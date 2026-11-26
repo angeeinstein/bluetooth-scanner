@@ -1,0 +1,85 @@
+# --- Console over native USB (USB-Serial-JTAG), no UART bridge on this board ---
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
+
+# --- Flash: ESP32-S3-WROOM-1-N8R8, 8 MB quad-SPI NOR flash ---
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# --- PSRAM: 8 MB *octal* PSRAM on the -R8 module variant ---
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# NOTE: deliberately NOT enabling CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP. It would
+# free internal RAM (task stacks must be internal), but it relocates Wi-Fi/LWIP
+# buffers into the same PSRAM the recording ring uses -- and simultaneous
+# recording + live streaming is a hard requirement, so we don't add PSRAM-bus
+# contention to that path. The OTA install task's stack was shrunk instead (see
+# ota_cloud.c) to fit in internal RAM without this.
+
+# --- Run at full speed: the accelerometer capture path needs the headroom ---
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# --- WebSocket support for the live-graph async push (dashboard) ---
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# --- FATFS long filenames: the default (LFN_NONE, classic 8.3 short names)
+# silently fails to open any of our timestamped/tagged recording filenames
+# or "benchmark.tmp" (9-char base name already exceeds the 8.3 limit) ---
+CONFIG_FATFS_LFN_HEAP=y
+
+# --- FreeRTOS main task needs a bit more stack; JSON building is printf-heavy ---
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# --- Tried moving FatFs's internal work buffers out of PSRAM
+# (ALLOC_PREFER_EXTRAM) to see if PSRAM-bus contention with the recording
+# ring buffer explained the SD benchmark's >300ms chunk stalls. Measured:
+# no change (0.81->0.80 MB/s write, 339->335ms worst chunk). Left at the
+# default (PSRAM) since it's not the bottleneck and internal RAM is the
+# scarcer resource here. ---
+
+# --- httpd's default 512-byte request-header budget is too tight for real
+# browser requests -- User-Agent/Accept-*/Sec-Fetch-*/sec-ch-ua-* client
+# hints alone can approach that, and a WebSocket handshake adds
+# Sec-WebSocket-Key/Version/Extensions on top. Once exceeded, the server
+# doesn't send our HTML back at all -- the browser just shows a blank page
+# and a "header fields are too long" error. 2048 gives real headroom. ---
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+CONFIG_HTTPD_MAX_URI_LEN=2048
+
+# --- LWIP socket pool. The default (10) is fully claimable by the dashboard
+# httpd alone: max_open_sockets=7 client connections + 3 reserved internally by
+# the HTTP server (listen + control) = 10, leaving nothing for mDNS, SNTP, the
+# UDP live stream, or the outbound HTTPS client that pulls OTA updates -- so
+# ota_cloud's socket() fails ("Failed to create socket ... sock < 0"). Raise it
+# to the LWIP maximum (16) so the OTA client always has a free socket. ---
+CONFIG_LWIP_MAX_SOCKETS=16
+
+# --- Internet firmware updates (ota_cloud.c) fetch over HTTPS from a Cloudflare
+# Worker. Verify the server certificate against the bundled CA roots; use the
+# full bundle so *.workers.dev's chain always validates. ---
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# --- TLS memory ---------------------------------------------------------------
+# The OTA firmware download's TLS kept failing with mbedtls alloc failures
+# (-0x7F00): during a bulk transfer the server sends full ~16KB TLS records, and
+# the internal heap (shared with Wi-Fi + httpd) has no 16KB contiguous block for
+# the record buffer. Move mbedTLS's memory into the 8MB PSRAM. This affects ONLY
+# TLS -- the OTA download and the periodic device-IP report. The live WS/UDP
+# stream is NOT TLS, so simultaneous recording + live streaming is unaffected
+# (unlike relocating Wi-Fi/LWIP, which we deliberately do NOT do). Hardware
+# SHA/AES with PSRAM input is handled by ESP-IDF (it bounces through internal DMA
+# buffers as needed). Dynamic buffers stay on too, to keep PSRAM use tight.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+
+# --- OTA rollback: a freshly-updated image boots in "pending verify" state and
+# is only made permanent once the firmware comes up and calls
+# esp_ota_mark_app_valid_cancel_rollback() (see ota_mark_valid() at the end of
+# app_main). If a bad update panics/resets before that, the bootloader reverts
+# to the previous slot -- so a broken OTA can't brick a device. ---
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

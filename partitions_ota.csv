@@ -1,0 +1,14 @@
+# ESP32-S3 (8 MB flash) dual-OTA layout.
+#
+# nvs is deliberately kept at 0x9000/0x6000 (unchanged from the old single-app
+# layout) so all saved settings -- Wi-Fi networks, accel
+# "remember", battery learning, button-marker toggle, TS-ignore -- survive the
+# one-time USB reflash that adopts this layout. The app moves from a single 4 MB
+# "factory" partition to two 3 MB OTA slots; the ~1.3 MB app has ample headroom.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+otadata,    data, ota,     0xf000,   0x2000,
+phy_init,   data, phy,     0x11000,  0x1000,
+ota_0,      app,  ota_0,   0x20000,  0x300000,
+ota_1,      app,  ota_1,   0x320000, 0x300000,

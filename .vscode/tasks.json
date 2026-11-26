@@ -1,0 +1,18 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Serial Monitor (auto-reconnect)",
+      "detail": "Reconnecting raw serial monitor (survives reboots/crashes, unlike PlatformIO's). See tools/monitor.py.",
+      "type": "shell",
+      "command": "${env:USERPROFILE}/.platformio/penv/Scripts/python.exe",
+      "args": ["tools/monitor.py"],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}
