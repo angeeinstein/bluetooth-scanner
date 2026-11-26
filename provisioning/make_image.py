@@ -7,11 +7,11 @@ release: flash a fresh board once with any image, then update it over the air):
 
     python provisioning/make_image.py
 
-Writes provisioning/vibrashock-v<version>-full-flash.bin (replacing older ones):
+Writes provisioning/btscanner-v<version>-full-flash.bin (replacing older ones):
 bootloader + partition table + otadata + app at their real offsets, gaps (incl.
 nvs) left erased, to be written at 0x0 by flasher.pyw or a browser flasher.
 USB ONLY -- never upload it through the dashboard's firmware update (use the
-plain vibrashock-v<version>.bin there).
+plain btscanner-v<version>.bin there).
 """
 
 import csv
@@ -71,7 +71,7 @@ def main():
     if missing:
         sys.exit("Missing build output (%s) -- run `pio run` first." % ", ".join(missing))
 
-    out = os.path.join(HERE, "vibrashock-v%s-full-flash.bin" % version)
+    out = os.path.join(HERE, "btscanner-v%s-full-flash.bin" % version)
     # keep = flash mode/freq/size exactly as in the built bootloader header,
     # i.e. what the board boots with after a normal `pio run -t upload`.
     cmd = esptool_cmd() + ["--chip", "esp32s3", "merge_bin", "-o", out,

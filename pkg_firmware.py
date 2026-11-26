@@ -1,7 +1,7 @@
 # PlatformIO post-build helper. Two additive jobs, run after firmware.bin is
 # built. Neither changes how `pio run` / `pio run -t upload` (USB) behave.
 #
-#   1. Always: copy firmware.bin to ./dist/vibrashock-v<version>.bin (the
+#   1. Always: copy firmware.bin to ./dist/btscanner-v<version>.bin (the
 #      ready-to-upload OTA image; version from FIRMWARE_VERSION in version.h).
 #
 #   2. When the version is new: publish a GitHub release with that .bin attached
@@ -144,7 +144,7 @@ def _do_artifacts(verbose=False):
     try:
         src_bin = os.path.join(env.subst("$BUILD_DIR"), "firmware.bin")  # noqa: F821
         os.makedirs("dist", exist_ok=True)
-        dst = os.path.join("dist", "vibrashock-v%s.bin" % (version or "unknown"))
+        dst = os.path.join("dist", "btscanner-v%s.bin" % (version or "unknown"))
         shutil.copyfile(src_bin, dst)
         print("pkg_firmware: OTA image -> %s" % dst)
     except Exception as e:

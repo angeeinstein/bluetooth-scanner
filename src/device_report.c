@@ -167,7 +167,7 @@ static void report_task(void *arg) {
             continue;
         }
 
-        // device_id == the hostname's suffix (e.g. "vibrashock-cc1588" -> "cc1588"),
+        // device_id == the hostname's suffix (e.g. "btscanner-cc1588" -> "cc1588"),
         // so it always matches what /find/<device_id> resolves to.
         char host[40];
         wifi_manager_get_hostname(host, sizeof(host));

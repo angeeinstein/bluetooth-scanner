@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live viewer for the VibraShock recorder's UDP accelerometer stream.
+"""Live viewer for the BTScanner recorder's UDP accelerometer stream.
 
 Receives the full-rate (26.7kHz, undecimated) packet stream described in
 README.md ("UDP stream packet format"), and shows it as a scrolling
@@ -32,7 +32,7 @@ import sys
 
 QT_BINDING_CANDIDATES = ("PyQt5", "PySide6", "PyQt6", "PySide2")
 QT_BINDING_TO_INSTALL = "PyQt5"  # only used if none of the above are already present
-_BOOTSTRAP_GUARD_ENV = "_VIBRASHOCK_UDP_VIEWER_BOOTSTRAPPED"
+_BOOTSTRAP_GUARD_ENV = "_BTSCANNER_UDP_VIEWER_BOOTSTRAPPED"
 
 
 def _importable(module_name):
@@ -573,7 +573,7 @@ class FftTab(QtWidgets.QWidget):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, host, port, buffer_seconds):
         super().__init__()
-        self.setWindowTitle(f"VibraShock UDP viewer -- listening on {host}:{port}")
+        self.setWindowTitle(f"BTScanner UDP viewer -- listening on {host}:{port}")
         self.resize(1200, 800)
 
         capacity = int(buffer_seconds * SAMPLE_RATE_HZ)

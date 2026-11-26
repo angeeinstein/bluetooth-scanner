@@ -9,11 +9,11 @@ const char live_html[] =
 "<head>\n"
 "<meta charset=\"UTF-8\">\n"
 "<meta http-equiv=\"refresh\" content=\"0; url=/\">\n"
-"<title>VibraShock</title>\n"
+"<title>BTScanner</title>\n"
 "</head>\n"
 "<body>\n"
 "<script>location.replace(\"/\");</script>\n"
-"<p><a href=\"/\">Open the VibraShock dashboard</a></p>\n"
+"<p><a href=\"/\">Open the BTScanner dashboard</a></p>\n"
 "</body>\n"
 "</html>\n"
 ;

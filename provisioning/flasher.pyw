@@ -1,4 +1,4 @@
-"""VibraShock Flasher -- first-time USB flash of a fresh board, with a small GUI.
+"""BTScanner Flasher -- first-time USB flash of a fresh board, with a small GUI.
 
 Windows: double-click this file (or "Start Flasher.bat" next to it, which also
 shows any startup error). Elsewhere: run `python3 flasher.pyw`.
@@ -30,7 +30,7 @@ SETUP_URL = "http://192.168.4.1"
 AP_PASSWORD = "recorder123"  # the board's own setup Wi-Fi (AP_PASSWORD in wifi_manager.c)
 
 # esptool prints the chip's factory MAC while connecting; the board's Wi-Fi name
-# is "VibraShock-" + its last three bytes (device_id.c / wifi_manager.c).
+# is "BTScanner-" + its last three bytes (device_id.c / wifi_manager.c).
 MAC_RE = re.compile(r"MAC:\s*([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
 # "Writing at 0x... (37 %)" (esptool 4) and "Writing at 0x... [===> ] 98.3%" (esptool 5).
 PROGRESS_RE = re.compile(r"Writing at .*?(\d+(?:\.\d+)?)\s*%")
@@ -87,14 +87,14 @@ class App:
         self.ports = []
         self.mac = None
 
-        root.title("VibraShock Flasher")
+        root.title("BTScanner Flasher")
         root.minsize(620, 640)
         f = ttk.Frame(root, padding=14)
         f.pack(fill="both", expand=True)
         f.columnconfigure(1, weight=1)
         self.frame = f
 
-        ttk.Label(f, text="VibraShock Flasher", font=("Segoe UI", 14, "bold")).grid(
+        ttk.Label(f, text="BTScanner Flasher", font=("Segoe UI", 14, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w")
         ttk.Label(f, text="First-time USB setup of a new board. Later updates run over the air.",
                   foreground="#555").grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
@@ -282,7 +282,7 @@ class App:
         step(2, "2", "On your phone or laptop, join the board's Wi-Fi network:")
         fields = tk.Frame(p, bg=bg)
         fields.grid(row=3, column=1, sticky="w", pady=(2, 0))
-        ssid = "VibraShock-" + "".join(self.mac.split(":")[3:]) if self.mac else "VibraShock-XXXXXX"
+        ssid = "BTScanner-" + "".join(self.mac.split(":")[3:]) if self.mac else "BTScanner-XXXXXX"
         tk.Label(fields, text="Network", bg=bg, font=body).grid(row=0, column=0, sticky="w", padx=(0, 10))
         self.copy_field(fields, ssid, bg, 0, 1)
         tk.Label(fields, text="Password", bg=bg, font=body).grid(row=1, column=0, sticky="w", padx=(0, 10))
@@ -348,7 +348,7 @@ class App:
             messagebox.showerror("No firmware", "Select the *-full-flash.bin image first.")
             return
         if not image.endswith("-full-flash.bin") and not messagebox.askyesno(
-                "Unusual image", "This doesn't look like a *-full-flash.bin. A plain vibrashock-v*.bin "
+                "Unusual image", "This doesn't look like a *-full-flash.bin. A plain btscanner-v*.bin "
                 "(the over-the-air update file) will NOT boot when flashed here.\n\nFlash it anyway?"):
             return
         sel = self.selected_port()
@@ -410,7 +410,7 @@ def report_crash(exc_text, root=None):
         if root is None:
             root = tk.Tk()
             root.withdraw()
-        messagebox.showerror("VibraShock Flasher -- error",
+        messagebox.showerror("BTScanner Flasher -- error",
                              "The flasher hit an error:\n\n%s\n\nDetails: %s"
                              % (exc_text.strip().splitlines()[-1], log))
     except Exception:

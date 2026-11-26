@@ -1,4 +1,4 @@
-// Central GPIO pin map for the vibration-sensor board.
+// Central GPIO pin map for the BTScanner board (same hardware as the VibraShock recorder).
 // Verified against schematic — see SELFTEST_SPEC.md. Do not change without
 // re-checking the schematic; several of these are strapping-adjacent or
 // PSRAM pins on other modules and must stay exactly as specified.

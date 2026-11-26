@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VibraShock Recorder</title>
+<title>Bluetooth Scanner</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1420'/%3E%3Cpolyline points='2,17 8,17 11,8 15,26 19,6 23,20 26,17 30,17' fill='none' stroke='%2358a6ff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
   :root{
@@ -370,7 +370,7 @@
 
 <header class="apphead">
   <div class="sbar">
-    <span class="brand"><svg width="20" height="20" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#0f1420"/><polyline points="2,17 8,17 11,8 15,26 19,6 23,20 26,17 30,17" fill="none" stroke="#58a6ff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="brand-text"> VibraShock</span></span>
+    <span class="brand"><svg width="20" height="20" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#0f1420"/><polyline points="2,17 8,17 11,8 15,26 19,6 23,20 26,17 30,17" fill="none" stroke="#58a6ff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="brand-text"> BTScanner</span></span>
     <span class="si sbar-model">IIS3DWB</span>
     <span class="sp"></span>
     <span class="si"><span class="dot" id="live-dot"></span><span id="live-text">connecting…</span></span>
@@ -714,17 +714,17 @@
         <div class="row"><span class="k">NTP synced</span><span class="v" id="wifi-ntp">–</span></div>
         <div class="row"><span class="k">Clock</span><span class="v" id="wifi-time">–</span></div>
         <div class="row"><span class="k">Sync clock (TSF)</span><span class="v" id="wifi-tsf" title="802.11 TSF timer — a microsecond clock all devices on this AP share (disciplined to the AP's beacon). The basis for time-aligning recordings across multiple devices.">–</span></div>
-        <div class="row"><span class="k">Answer to vibrashock.local</span><span class="v"><input type="checkbox" id="mdns-friendly" onchange="setMdnsFriendly(this)"></span></div>
+        <div class="row"><span class="k">Answer to btscanner.local</span><span class="v"><input type="checkbox" id="mdns-friendly" onchange="setMdnsFriendly(this)"></span></div>
         <div class="row"><span class="k" title="Periodically tells the update server this device's current local IP (and basic status: hostname, Wi-Fi, battery, recording) so you can find it via the server's find page. Uses the same server as firmware updates; does nothing until one is configured.">Send status reports</span><span class="v"><input type="checkbox" id="report-enabled" onchange="setReportEnabled(this)"></span></div>
         <div class="row" id="wifi-txpower-row" style="display:none"><span class="k">TX power</span><span class="v" style="color:var(--yellow)">reduced (repeated brownouts)</span></div>
       </div>
-      <div class="sub" data-sgroup="wifi" style="margin:-4px 2px 0">Each device always has its own <b>&lt;device name&gt;.local</b>. With several devices, keep this on for only one (your main board) so <b>vibrashock.local</b> isn't ambiguous.</div>
+      <div class="sub" data-sgroup="wifi" style="margin:-4px 2px 0">Each device always has its own <b>&lt;device name&gt;.local</b>. With several devices, keep this on for only one (your main board) so <b>btscanner.local</b> isn't ambiguous.</div>
 
       <div class="card" data-sgroup="wifi">
         <h2>Access point</h2>
         <div class="row"><span class="k">Current AP</span><span class="v" id="wifi-cur-bssid" style="font-family:var(--mono); font-size:12px">–</span></div>
         <div class="row"><span class="k">AP selection</span><span class="v" id="wifi-pin-state">Automatic (strongest)</span></div>
-        <div class="sub" style="margin:2px 0 8px">Normally the device joins the strongest AP of its network. Pin it to one specific AP so several VibraShock devices share the same access point — needed for time-aligned (TSF) recordings. If that AP is out of range it falls back to a normal connect, so this never strands the device.</div>
+        <div class="sub" style="margin:2px 0 8px">Normally the device joins the strongest AP of its network. Pin it to one specific AP so several BTScanner devices share the same access point — needed for time-aligned (TSF) recordings. If that AP is out of range it falls back to a normal connect, so this never strands the device.</div>
         <div class="btnrow">
           <button type="button" id="ap-choose-btn" onclick="apScan()">Pin to a specific AP…</button>
           <button type="button" id="ap-unpin-btn" onclick="apClearPin()" style="display:none">Back to automatic</button>
@@ -1717,7 +1717,7 @@ function setAutoRange(cb) {
 }
 function setMdnsFriendly(cb) {
   postJson('/api/settings/mdns_friendly', { enabled: cb.checked ? 1 : 0 }, function() {
-    toast(cb.checked ? 'This device now answers vibrashock.local' : 'vibrashock.local disabled on this device');
+    toast(cb.checked ? 'This device now answers btscanner.local' : 'btscanner.local disabled on this device');
   });
 }
 function setReportEnabled(cb) {
@@ -4111,7 +4111,7 @@ function saveSpectrogramPng() {
   // Caption (top)
   var startDate = new Date(recStartMs);
   ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.textAlign = 'left'; ctx.font = '13px sans-serif';
-  ctx.fillText('VibraShock spectrogram · ' + recSignal + ' magnitude · Hann ' + recFftSize +
+  ctx.fillText('BTScanner spectrogram · ' + recSignal + ' magnitude · Hann ' + recFftSize +
                ' · ' + (SAMPLE_RATE_HZ / 1000).toFixed(1) + ' kHz · start ' + fmtDateTime(startDate) +
                ' · ' + mmss(totalS) + ' · ' + (1000 / recLineIntervalMs).toFixed(0) + ' lines/s' +
                (specHadGap ? '  ·  gap present (tab was suspended)' : ''),

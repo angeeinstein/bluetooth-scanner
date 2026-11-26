@@ -67,12 +67,12 @@ void wifi_manager_get_status(wifi_status_t *out);
 // (there is no AP to sync to, so no shared reference exists).
 int64_t wifi_manager_get_tsf_us(void);
 
-// This device's unique mDNS / DHCP hostname, e.g. "vibrashock-ccef4c" (reachable
+// This device's unique mDNS / DHCP hostname, e.g. "btscanner-ccef4c" (reachable
 // at <hostname>.local). Derived from the device id so multiple boards never
 // collide. Every device always answers to this name.
 void wifi_manager_get_hostname(char *out, size_t len);
 
-// This device's unique SoftAP SSID, e.g. "VibraShock-CCEF4C".
+// This device's unique SoftAP SSID, e.g. "BTScanner-CCEF4C".
 void wifi_manager_get_ap_ssid(char *out, size_t len);
 
 // The BSSID (MAC) of the AP the STA is associated to, or all-zero if not
@@ -107,9 +107,9 @@ bool wifi_manager_get_ap_pin(char *ssid_out, size_t ssid_len, uint8_t bssid_out[
 // descending RSSI. Fills up to `max_results`; returns the count, or -1 on failure.
 int wifi_manager_scan_aps(const char *ssid, wifi_ap_scan_t *out, int max_results);
 
-// Whether this device also answers to the shared friendly name "vibrashock.local"
+// Whether this device also answers to the shared friendly name "btscanner.local"
 // (in addition to its unique hostname). Persisted; default on. With several
-// devices on one network, leave it on for only the "main" one so vibrashock.local
+// devices on one network, leave it on for only the "main" one so btscanner.local
 // unambiguously reaches that board.
 bool wifi_manager_get_mdns_friendly(void);
 void wifi_manager_set_mdns_friendly(bool enabled);

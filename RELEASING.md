@@ -56,11 +56,11 @@ From the project folder:
 
 ```powershell
 gh auth status          # should say: Logged in to github.com account angeeinstein
-gh repo view            # should show: angeeinstein/vibrashock
+gh repo view            # should show: angeeinstein/bluetooth-scanner
 gh release list         # should print nothing yet (no releases) — confirms read access
 ```
 
-If `gh repo view` shows `angeeinstein/vibrashock`, you're done — `gh` resolves
+If `gh repo view` shows `angeeinstein/bluetooth-scanner`, you're done — `gh` resolves
 the repo from the git remote, so the local folder name is irrelevant.
 
 ### Do I need to enable "Releases" on the repo first?
@@ -89,7 +89,7 @@ published. To cut a release, e.g. `1.0.1`:
    `…\platformio.exe run -t release`, or in the PlatformIO sidebar under *Project
    Tasks → esp32-s3-selftest → Custom → Publish release*.
 
-That runs `gh release create v1.0.1 …`, attaches `dist/vibrashock-v1.0.1.bin`,
+That runs `gh release create v1.0.1 …`, attaches `dist/btscanner-v1.0.1.bin`,
 and uses your `[1.0.1]` changelog section as the notes. If any guard isn't met it
 tells you exactly why (e.g. "commit isn't pushed") and does nothing else.
 

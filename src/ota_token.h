@@ -12,8 +12,8 @@
 // determined attacker; that would need Secure Boot signing.
 //
 // Rotate it any time by pasting a new random value here and rebuilding (e.g.
-//   python -c "import secrets; print('VSK1-' + secrets.token_hex(20))"
+//   python -c "import secrets; print('BTS1-' + secrets.token_hex(20))"
 // ). Keep this value -- and your .bin files -- private. Set to "" to disable
 // the check (any valid firmware image will then be accepted). A USB flash always
 // bypasses this check, so a mismatched token can never lock you out.
-#define OTA_UPDATE_TOKEN "VSK1-721aef63637dc82608aeb56e5af851241d969086"
+#define OTA_UPDATE_TOKEN "BTS1-3ec4a7a6731c40e869b722390b50c9641063ee04"

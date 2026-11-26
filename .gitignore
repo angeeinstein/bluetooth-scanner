@@ -11,3 +11,8 @@ provisioning/flasher-error.log
 # Machine-local Claude Code state
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+__pycache__/
+*.pyc
+
+# Downloaded by the ESP-IDF component manager (pinned in dependencies.lock)
+managed_components/

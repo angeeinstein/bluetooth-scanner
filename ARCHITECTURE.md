@@ -1,10 +1,15 @@
-# VibraShock Firmware Architecture
+# BTScanner Firmware Architecture
 
 Detailed architecture reference for the ESP32‑S3 vibration‑recorder firmware
 (bachelor's thesis project). This document describes *how* the firmware is
 built — its module structure, the real‑time acquisition pipeline, the
 concurrency model, the on‑disk formats, and the networking/power subsystems —
 at the level of detail needed to write about it or to onboard a new developer.
+
+> **Inherited document.** This was written for the VibraShock vibration recorder,
+> which BTScanner was forked from. Each section is rewritten as the matching
+> subsystem is reworked for BLE scanning (see the README's work-in-progress
+> note). Until then, a section describes the inherited recorder design.
 
 > The Mermaid diagrams below render automatically on GitHub. For a designed,
 > illustrated version see the companion HTML document.
@@ -378,7 +383,7 @@ field, on a bike), while the STA interface optionally joins existing Wi‑Fi.
   covering chip/device, accel, recording, SD, charger, Wi‑Fi, and CSV‑export
   state.
 - **Discoverability:** the STA interface sets a DHCP hostname and publishes an
-  mDNS name (`vibrashock.local`) so it's reachable by name across a subnet even
+  mDNS name (`btscanner.local`) so it's reachable by name across a subnet even
   where mDNS multicast doesn't traverse.
 - **Time:** SNTP after joining a network; a browser‑supplied clock is a fallback
   (AP‑only mode) so recordings get real timestamps.
@@ -619,7 +624,7 @@ failures; a non‑200 status is treated as definitive, logged, and retried later
 with backoff). It **never touches the sampling/SD path**, and is a no‑op until an
 update server is configured. A persisted "Send status reports" toggle (Settings →
 Wi‑Fi, default on) can disable it entirely. The reported `device_id` is the
-hostname's suffix (`vibrashock-cc1588` → `cc1588`), so it always matches the
+hostname's suffix (`btscanner-cc1588` → `cc1588`), so it always matches the
 `/find` key.
 
 ## 15. Cross‑cutting design principles

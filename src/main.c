@@ -1,8 +1,9 @@
-// Vibration data-acquisition firmware for the ESP32-S3 vibration-sensor
-// board (bachelor's thesis project). Captures the IIS3DWB accelerometer at
-// its full fixed 26.7kHz rate via FIFO+DMA, records to the SD card, and
-// serves a web dashboard (live graph, recording control, SD benchmark,
-// charger status/control, Wi-Fi setup).
+// BTScanner firmware: Bluetooth (BLE) scanner / logger for the ESP32-S3 board
+// originally built as the VibraShock vibration recorder (same hardware). Being
+// reworked from the recorder: it still captures the IIS3DWB accelerometer,
+// records to the SD card, and serves a web dashboard (live graph, recording
+// control, SD benchmark, charger status/control, Wi-Fi setup); BLE scanning
+// and logging replace the vibration features step by step.
 
 #include <stdio.h>
 

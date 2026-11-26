@@ -1,5 +1,5 @@
 @echo off
-rem Starts the VibraShock Flasher with a real Python install (not the Microsoft
+rem Starts the BTScanner Flasher with a real Python install (not the Microsoft
 rem Store stub). Keeps this window open if something goes wrong.
 cd /d "%~dp0"
 set "PY="

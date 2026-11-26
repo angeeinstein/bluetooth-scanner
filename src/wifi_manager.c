@@ -29,17 +29,17 @@
 // ALSO always has a unique name/SSID derived from its device id (see
 // compute_device_names) so multiple boards never collide and a future single-page
 // controller can address each one individually.
-#define MDNS_FRIENDLY "vibrashock"
+#define MDNS_FRIENDLY "btscanner"
 
 // Per-device unique identity, computed once at start from the device id:
-//   s_host_unique  e.g. "vibrashock-ccef4c"  (mDNS + DHCP hostname)
-//   s_ap_ssid      e.g. "VibraShock-CCEF4C"  (SoftAP SSID)
+//   s_host_unique  e.g. "btscanner-ccef4c"  (mDNS + DHCP hostname)
+//   s_ap_ssid      e.g. "BTScanner-CCEF4C"  (SoftAP SSID)
 static char s_host_unique[32];
 static char s_ap_ssid[32];
 static esp_netif_t *s_sta_netif = NULL;
 static bool s_mdns_ready = false;
 // Whether this device also answers to the shared MDNS_FRIENDLY name. Persisted;
-// default on so a lone device is reachable at vibrashock.local exactly as before.
+// default on so a lone device is reachable at btscanner.local exactly as before.
 static bool s_mdns_friendly = true;
 
 #define REDUCED_TX_POWER 34 // 8dBm, see esp_wifi_set_max_tx_power()'s mapping table
@@ -540,16 +540,16 @@ static void apply_failure(fail_class_t fc) {
     }
 }
 
-// Derives the per-device unique SSID + hostname from the device id ("VS-CCEF4C"
-// -> "VibraShock-CCEF4C" / "vibrashock-ccef4c"). mDNS/DHCP hostnames must be
+// Derives the per-device unique SSID + hostname from the device id ("BTS-CCEF4C"
+// -> "BTScanner-CCEF4C" / "btscanner-ccef4c"). mDNS/DHCP hostnames must be
 // lowercase; the SSID keeps the branded casing.
 static void compute_device_names(void) {
     char devid[16];
     device_id_str(devid, sizeof(devid));
     const char *tail = strchr(devid, '-');
     tail = tail ? tail + 1 : devid;
-    snprintf(s_ap_ssid, sizeof(s_ap_ssid), "VibraShock-%s", tail);
-    snprintf(s_host_unique, sizeof(s_host_unique), "vibrashock-%s", tail);
+    snprintf(s_ap_ssid, sizeof(s_ap_ssid), "BTScanner-%s", tail);
+    snprintf(s_host_unique, sizeof(s_host_unique), "btscanner-%s", tail);
     for (char *p = s_host_unique; *p; p++) {
         *p = (char)tolower((unsigned char)*p);
     }
@@ -565,7 +565,7 @@ static void load_mdns_cfg(void) {
     s_mdns_friendly = v != 0;
 }
 
-// (Re)applies the shared "vibrashock.local" alias as a delegated mDNS hostname
+// (Re)applies the shared "btscanner.local" alias as a delegated mDNS hostname
 // pointing at our own current STA IP -- so the designated main device answers the
 // friendly name while every device always keeps its unique s_host_unique name.
 // Called at mDNS init, on each got-IP (the STA IP may change), and on toggle.
@@ -604,7 +604,7 @@ static void on_got_ip(void) {
     s_status.sta_fail_reason[0] = '\0';
     xSemaphoreGive(s_status_mutex);
     persist_nets();
-    apply_friendly_mdns(); // (re)point vibrashock.local at the new STA IP
+    apply_friendly_mdns(); // (re)point btscanner.local at the new STA IP
     xTaskCreate(ntp_sync_task, "ntp_sync", 4096, NULL, 5, NULL);
 }
 
@@ -844,13 +844,13 @@ bool wifi_manager_start(void) {
         // Unique service instance name so a future single-page controller can
         // enumerate every board on the network and tell them apart.
         char inst[48];
-        snprintf(inst, sizeof(inst), "VibraShock Recorder (%s)", s_ap_ssid + strlen("VibraShock-"));
+        snprintf(inst, sizeof(inst), "Bluetooth Scanner (%s)", s_ap_ssid + strlen("BTScanner-"));
         mdns_instance_name_set(inst);
         mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
         s_mdns_ready = true;
-        apply_friendly_mdns(); // add the shared vibrashock.local alias if enabled
+        apply_friendly_mdns(); // add the shared btscanner.local alias if enabled
         printf("wifi_manager: mDNS hostname http://%s.local/%s\n", s_host_unique,
-               s_mdns_friendly ? " (+ vibrashock.local)" : "");
+               s_mdns_friendly ? " (+ btscanner.local)" : "");
     } else {
         printf("wifi_manager: mDNS init failed (non-fatal, IP access still works)\n");
     }
@@ -934,7 +934,7 @@ void wifi_manager_set_mdns_friendly(bool enabled) {
         nvs_commit(h);
         nvs_close(h);
     }
-    apply_friendly_mdns(); // add or drop the vibrashock.local alias immediately
+    apply_friendly_mdns(); // add or drop the btscanner.local alias immediately
 }
 
 int wifi_manager_get_saved(wifi_saved_info_t *out, int max) {

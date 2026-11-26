@@ -1,9 +1,20 @@
-# Vibration recorder firmware
+# BTScanner — Bluetooth scanner firmware
 
-PlatformIO + ESP-IDF firmware for the ESP32-S3 vibration-sensor board. Captures the ST IIS3DWB
-accelerometer at its full fixed 26.7kHz rate via FIFO+DMA, records raw samples to the SD card, and
-serves a web dashboard (live graph, recording control, SD throughput benchmark, charger status/
-control, Wi-Fi setup). Built for a bachelor's thesis on vibration measurement.
+PlatformIO + ESP-IDF firmware that turns the ESP32-S3 board from the
+[VibraShock](https://github.com/angeeinstein/vibrashock) vibration recorder into a **Bluetooth Low
+Energy scanner and logger**. It scans for nearby BLE devices, logs what it sees to the SD card, and
+records a motion profile of the device itself from the on-board IIS3DWB accelerometer. The web
+dashboard, multi-network Wi-Fi, OTA updates, battery/charger handling and status LED carry over
+from VibraShock.
+
+> **Work in progress.** This repo started as a copy of VibraShock 1.6.0 and is being reworked step
+> by step: (1) rename and new identity — done; (2) BLE scanner with a live device list; (3) SD
+> scan log — a per-device summary by default, plus a switchable full capture of every
+> advertisement; (4) the accelerometer reduced to a ~100 Hz motion log plus still/moving, steps and
+> estimated speed; (5) removing the vibration analysis UI. Until a step lands, the sections below
+> still describe the inherited vibration-recorder behaviour.
+>
+> The ESP32-S3 radio is **BLE only** — Classic Bluetooth (BR/EDR) devices can't be discovered.
 
 ## Set up a new board
 
@@ -11,11 +22,11 @@ A fresh board needs **one** USB flash; after that it updates over the air. Every
 first flash is in **[provisioning/](provisioning/)** — no VS Code or PlatformIO needed:
 
 - **In the browser (easiest):** open <https://espressif.github.io/esptool-js/> in Chrome/Edge →
-  Connect → flash `provisioning/vibrashock-v<version>-full-flash.bin` at address **`0x0`**.
+  Connect → flash `provisioning/btscanner-v<version>-full-flash.bin` at address **`0x0`**.
 - **GUI flasher:** double-click [provisioning/flasher.pyw](provisioning/flasher.pyw) (needs
   Python 3), pick the port marked (Espressif), click **Flash**.
 
-Then join the board's `VibraShock-XXXXXX` Wi-Fi (password `recorder123`) and open
+Then join the board's `BTScanner-XXXXXX` Wi-Fi (password `recorder123`) and open
 <http://192.168.4.1>. Step-by-step guide: [provisioning/README.md](provisioning/README.md).
 
 See [SELFTEST_SPEC.md](SELFTEST_SPEC.md) for the board's hardware/pin specification and
@@ -24,7 +35,7 @@ See [SELFTEST_SPEC.md](SELFTEST_SPEC.md) for the board's hardware/pin specificat
 Firmware identity lives in [src/version.h](src/version.h) — name, version (bump `FIRMWARE_VERSION`
 per release), author, and the compiler build stamp. It's shown in the dashboard's **About** card
 (Settings tab, last item) alongside a per-board **Device ID** derived from the chip's factory MAC
-(`VS-XXXXXX`, unique with no configuration), and printed to the boot serial log. By Angelo Popovic.
+(`BTS-XXXXXX`, unique with no configuration), and printed to the boot serial log. By Angelo Popovic.
 
 ## Build & flash
 
@@ -59,7 +70,7 @@ reboots, with **automatic rollback** if the new image fails to boot. See
 
 **Getting the update image.** The OTA image is just the built app binary. `pio run` produces it at
 `.pio/build/esp32-s3-selftest/firmware.bin`, and a post-build step (`pkg_firmware.py`) also drops a
-version-named copy at **`dist/vibrashock-v<version>.bin`** (version from `FIRMWARE_VERSION` in
+version-named copy at **`dist/btscanner-v<version>.bin`** (version from `FIRMWARE_VERSION` in
 `src/version.h`) — that's the file to upload. This is purely additive; normal `pio run` /
 `pio run -t upload` (USB) behavior is unchanged, and `dist/` is git-ignored.
 
@@ -72,7 +83,7 @@ a USB flash (a device only trusts the token in its currently-running firmware).
 **Publishing a release.** Firmware is always built **locally** in PlatformIO (GitHub never builds it).
 Day-to-day you rebuild and OTA-flash freely at the same `FIRMWARE_VERSION` — nothing is published. To
 cut a release you bump the version and run the `release` task, which publishes it to **GitHub
-Releases** with `dist/vibrashock-v<version>.bin` attached and the matching `CHANGELOG.md` section as
+Releases** with `dist/btscanner-v<version>.bin` attached and the matching `CHANGELOG.md` section as
 the notes. Concretely:
 
 1. Add your changes under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) as you work.
@@ -103,9 +114,9 @@ auto-update would fetch from.)
 
 ## Using it
 
-1. Flash and boot. Connect a phone/laptop to Wi-Fi **`VibraShock-Recorder`** / password
+1. Flash and boot. Connect a phone/laptop to Wi-Fi **`BTScanner-Recorder`** / password
    **`recorder123`** (always on, regardless of infra Wi-Fi state).
-2. Open **http://192.168.4.1/** (or **http://vibrashock.local/** via mDNS, on either the
+2. Open **http://192.168.4.1/** (or **http://btscanner.local/** via mDNS, on either the
    SoftAP or an infra network — works out of the box on macOS/iOS/Linux/Android and in
    Chrome/Edge on Windows; other Windows browsers may need Bonjour installed) — the
    **Dashboard** tab shows a live accelerometer graph immediately. A status bar at the top gives
@@ -195,7 +206,7 @@ boot and must be re-triggered on purpose. A missing source `.bin` or invalid che
 discards the partial. (`csv_export_resume_on_boot()` in `src/csv_export.c`.)
 
 A `.log` sidecar next to each `.bin` records start/stop/rotation events with the capture settings
-and diagnostics at each point: the provenance stamp (`dev` = the recording board's `VS-XXXXXX` id,
+and diagnostics at each point: the provenance stamp (`dev` = the recording board's `BTS-XXXXXX` id,
 `fw` = firmware version), the full-scale range (`fs_g`), sample rate, anti-alias filter (`lpf2`),
 accelerometer die temperature (`temp_c`, start and end), recording duration (`dur_s`), and the
 sensor-overrun / ring-buffer-drop counters (both should read zero for a clean capture). So any file
@@ -455,7 +466,7 @@ optional rather than required for a quick live look.
   kept deliberately conservative since runtime is effectively unlimited, so keeping a cell reserve
   costs nothing.
 - `src/wifi_manager.c/.h` — always-on SoftAP + a smartphone-style multi-network STA manager + NTP +
-  mDNS (`vibrashock.local`, registered on both netifs). Remembers up to `WIFI_MAX_SAVED` (8)
+  mDNS (`btscanner.local`, registered on both netifs). Remembers up to `WIFI_MAX_SAVED` (8)
   networks in an NVS blob (personal or enterprise; least-recently-used evicted when a 9th is added,
   by a `used_seq` stamp), and a dedicated **reconnect task** drives all connection attempts via a
   message queue (the event handler just forwards disconnect/got-IP events to it). Auto-connect

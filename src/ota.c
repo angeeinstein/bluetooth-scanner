@@ -142,7 +142,7 @@ bool ota_end(void) {
     // ota_token.h) -- rejects a valid-but-unrelated firmware someone else built.
     if (OTA_TOKEN_LEN > 0 && !s_token_found) {
         esp_ota_abort(s_handle); // discard -- never activate an unrecognized image
-        set_error("unrecognized firmware -- not a VibraShock build (missing update token)");
+        set_error("unrecognized firmware -- not a BTScanner build (missing update token)");
         s_state = OTA_FAILED;
         return false;
     }

@@ -7,7 +7,7 @@ What's in this folder:
 
 | File | What it is |
 |---|---|
-| `vibrashock-v<version>-full-flash.bin` | The complete image (bootloader + partition table + app) — the only file you flash |
+| `btscanner-v<version>-full-flash.bin` | The complete image (bootloader + partition table + app) — the only file you flash |
 | `flasher.pyw` | GUI flasher: double-click, pick the port, click **Flash** |
 | `Start Flasher.bat` | Fallback launcher if `flasher.pyw` closes right away (shows the error) |
 | `make_image.py` | Rebuilds the image from the last `pio run` (developers only) |
@@ -33,7 +33,7 @@ What's in this folder:
 
 ## After flashing
 
-The board restarts and opens its own Wi-Fi, **`VibraShock-XXXXXX`** (password
+The board restarts and opens its own Wi-Fi, **`BTScanner-XXXXXX`** (password
 **`recorder123`**). Join it and open <http://192.168.4.1> to add your Wi-Fi network — from then on use the dashboard, including for
 firmware updates.
 
@@ -44,6 +44,6 @@ firmware updates.
 - **Connection fails / no port shows up?** Hold the **BOOT** button while plugging in the USB
   cable, then try again. Use a USB cable that carries data (some are charge-only).
 - The `-full-flash.bin` is **USB only** — never upload it through the dashboard's firmware update;
-  that takes the plain `vibrashock-v<version>.bin`.
+  that takes the plain `btscanner-v<version>.bin`.
 - The image doesn't have to be the newest version: flash any image once, then update over the air.
   To make a new one after a build: `python provisioning/make_image.py`.
