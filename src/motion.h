@@ -7,9 +7,9 @@
 //
 //   - gravity estimate (1 s low-pass) -> tilt, and the dynamic acceleration
 //   - activity (RMS of dynamic acceleration per second) -> still / moving
-//   - steps: adaptive peak detection on the vertical component, counted only
-//     after 3 regular steps in a row -> cadence, step length (Weinberg),
-//     walking speed and distance
+//   - walking: a steady rhythm in the vertical component (autocorrelation
+//     over the last 4 s) -> cadence; steps and distance accrue from the
+//     cadence while walking; step length (Weinberg) -> walking speed
 //   - main horizontal axis of the movement in the device frame (180 deg
 //     ambiguous) and how clear it is
 //
@@ -38,6 +38,8 @@ typedef struct {
     float step_m;          // average estimated step length of the last steps
     float speed_mps;       // walking speed; 0 when still; -1 = moving but unknown
     float dist_m;          // walked distance since boot (from steps)
+    float rhythm;          // 0..1, how strongly the vertical motion repeats over the last 4 s
+                           // at a step/stride period (walking ~0.6-0.95, vehicle/handling ~0.2)
     float axis_deg;        // main horizontal movement axis, 0..180 deg from the device's
                            // X axis projected onto the horizontal plane; -1 = none
     float axis_conf;       // 0..1, how clearly the movement follows that axis

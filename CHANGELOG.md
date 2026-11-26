@@ -15,6 +15,21 @@ before that are in the
 ## [Unreleased]
 
 ### Fixed
+- **Walking was almost never detected**, and steps / distance froze after the
+  first few steps: the step detector could lock up on a bounce right after a
+  step (common in a pocket or bag). Walking is now found from the step rhythm
+  (autocorrelation of the vertical motion over 4 s): on a real 55 min log it
+  went from 0 s to 223 s of walking in 8 walks at 90–125 steps/min, while
+  driving and handling stay *moving*. Steps and distance accrue from the
+  cadence while walking; the step length estimate is a bit shorter (pocket
+  instead of waist).
+- **Device names with invalid UTF-8 broke the CSV** for standard parsers (one
+  device advertised the single byte 0xFF as its name). Names are now always
+  valid UTF-8 — invalid bytes and control characters become `?`; the raw
+  payload hex still has the original bytes. Applies to the dashboard too.
+- **A scan-log row could be dropped under Wi-Fi/web traffic** (`log_drops=1`):
+  a writer waited only 20 ms for the line lock, whose holder can be preempted
+  by the network tasks. It now waits up to 500 ms.
 - **POWER single click placed no marker** (and gave no white flash): the
   "Marker on POWER-button click" setting was read from VibraShock's key, which
   is off by default. BTScanner now keeps its own setting, on by default
@@ -31,6 +46,9 @@ before that are in the
   at VibraShock's 10; the boot log reports free internal RAM at each stage.
 
 ### Added
+- MOTION rows (and the status API) carry `rhythm`, 0–1: how strongly the
+  vertical motion repeats at a step period — high when walking, low in a
+  vehicle or while handling.
 - **BLE scanner.** Scans continuously for Bluetooth Low Energy devices
   (legacy and BLE 5 extended advertising) with no duplicate filter, so every
   advertisement and scan response is received; restarts itself if scanning

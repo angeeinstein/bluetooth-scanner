@@ -158,8 +158,11 @@ in between; the log records `wifi_off` / `wifi_on` INFO rows.
    Shown in the Dashboard's *Motion* card, as a 10-minute chart in Analyze, as a MOTION row in the
    log every second, and — if *Log 100 Hz acceleration* is on (Settings → Motion sensor, default
    on) — as every ~100 Hz sample in `<base>.motion.csv`. It answers "did it stand still or move
-   around, and roughly how"; it does not track position. Speed is only estimated while walking
-   (from step rhythm and step length); in a vehicle the state is just *moving*.
+   around, and roughly how"; it does not track position. *Walking* means a steady step rhythm in
+   the vertical motion (found by autocorrelation over 4 s, so it works in a pocket or bag too);
+   steps, distance and speed are estimated only then. In a vehicle, or while the board is handled,
+   the state is just *moving* — the MOTION row's `rhythm` value (≈0.6–0.95 walking, ≈0.2 otherwise)
+   tells the two apart.
 7. **Analyze** — one device in detail: decoded fields, the last advertisement and scan response as
    hex, its mean RSSI and packets per second over the last 2 minutes (kept on the board, so it's
    there even if the page was closed), and the air-activity chart.
@@ -198,10 +201,11 @@ data, target, info`.
 - `kind=ADV`: one received report — an advertisement or a scan response, legacy (`ADV_IND`,
   `ADV_DIRECT_IND`, `ADV_SCAN_IND`, `ADV_NONCONN_IND`, `SCAN_RSP`) or extended (`EXT_ADV`,
   `EXT_SCAN_RSP`). `data` is the complete raw payload as hex; the parsed columns are decoded from
-  it. `name` comes from the per-address cache, `name_src` says whether this packet carried it.
+  it. `name` comes from the per-address cache, `name_src` says whether this packet carried it;
+  it is always valid UTF-8 (invalid bytes become `?` — the raw bytes are in `data`).
   Extended payloads over 255 bytes arrive as several rows (`data_status` 1 = more follows).
 - `MOTION` (once per second): `state`, `activity_g`, `peak_g`, `steps`, `cadence_spm`, `step_m`,
-  `speed_mps`, `dist_m`, `axis_deg`, `axis_conf`, `tilt_deg`, `g` (gravity direction).
+  `speed_mps`, `dist_m`, `rhythm`, `axis_deg`, `axis_conf`, `tilt_deg`, `g` (gravity direction).
 - `TARGET`, `MARK`, `STATUS` (once per second: reports/s, devices, drops, Wi-Fi, battery,
   temperatures), `INFO` (`clock_set`, `clock_adjusted`, `wifi_off`, `wifi_on`, `rules_changed`),
   `START` (scan settings, rules) and `STOP` rows carry key=value pairs in `info`.

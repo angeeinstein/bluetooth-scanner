@@ -89,6 +89,51 @@ const char *ble_addr_kind(uint8_t addr_type, const uint8_t addr[BLE_ADDR_LEN]) {
 
 // --- AD structure decoding ----------------------------------------------
 
+// Length of the valid UTF-8 sequence starting at s (n bytes left), 0 if invalid.
+static int utf8_seq_len(const uint8_t *s, int n) {
+    uint8_t c = s[0];
+    int len;
+    uint8_t lo = 0x80, hi = 0xBF; // allowed range of the second byte
+    if (c < 0x80) return 1;
+    if (c >= 0xC2 && c <= 0xDF) len = 2;
+    else if (c >= 0xE0 && c <= 0xEF) {
+        len = 3;
+        if (c == 0xE0) lo = 0xA0;      // no overlong forms
+        else if (c == 0xED) hi = 0x9F; // no UTF-16 surrogates
+    } else if (c >= 0xF0 && c <= 0xF4) {
+        len = 4;
+        if (c == 0xF0) lo = 0x90;
+        else if (c == 0xF4) hi = 0x8F; // <= U+10FFFF
+    } else return 0;
+    if (n < len || s[1] < lo || s[1] > hi) return 0;
+    for (int i = 2; i < len; i++) {
+        if ((s[i] & 0xC0) != 0x80) return 0;
+    }
+    return len;
+}
+
+// Copies a local-name AD field as valid UTF-8 (names are UTF-8 by spec, but
+// devices send arbitrary bytes): an invalid byte or a control character
+// becomes '?', a NUL ends the name (zero padding), and a character that
+// doesn't fit is cut whole. The raw bytes stay in the payload hex.
+static void name_to_utf8(const uint8_t *v, int vlen, char *out, int cap) {
+    int o = 0;
+    for (int i = 0; i < vlen && v[i] != 0;) {
+        int len = utf8_seq_len(&v[i], vlen - i);
+        if (len == 0 || (len == 1 && (v[i] < 0x20 || v[i] == 0x7F))) {
+            if (o + 1 >= cap) break;
+            out[o++] = '?';
+            i++;
+            continue;
+        }
+        if (o + len >= cap) break;
+        memcpy(&out[o], &v[i], (size_t)len);
+        o += len;
+        i += len;
+    }
+    out[o] = '\0';
+}
+
 void ble_adv_parse(const uint8_t *data, uint8_t len, ble_adv_parsed_t *out) {
     memset(out, 0, sizeof(*out));
     uint8_t i = 0;
@@ -121,9 +166,7 @@ void ble_adv_parse(const uint8_t *data, uint8_t len, ble_adv_parsed_t *out) {
         case 0x08: // shortened local name
         case 0x09: // complete local name
             if (type == 0x09 || out->name_kind == 0) {
-                uint8_t n = vlen < BLE_NAME_MAX - 1 ? vlen : BLE_NAME_MAX - 1;
-                memcpy(out->name, v, n);
-                out->name[n] = '\0';
+                name_to_utf8(v, vlen, out->name, BLE_NAME_MAX);
                 out->name_kind = (type == 0x09) ? 2 : 1;
             }
             break;

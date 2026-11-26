@@ -77,7 +77,9 @@ static const char s_format_doc[] =
     "| sid | advertising set id (extended only) |\n"
     "| tx_power | dBm from the extended advertising header |\n"
     "| data_status | 0 complete, 1 incomplete (more fragments follow in later rows), 2 truncated |\n"
-    "| name | device name; cached per address, so packets without a name still carry it |\n"
+    "| name | device name; cached per address, so packets without a name still carry it. Always\n"
+    "  valid UTF-8: bytes that aren't (and control characters) become `?` -- the original bytes are in\n"
+    "  `data` |\n"
     "| name_src | adv / rsp = this packet carried the name (in the advertisement / scan response);\n"
     "  cache = taken from an earlier packet |\n"
     "| company_id | first manufacturer-specific entry: Bluetooth SIG company id, hex (004C = Apple) |\n"
@@ -101,10 +103,14 @@ static const char s_format_doc[] =
     "- MOTION: once per second, the board's own movement (accelerometer only, best effort): state\n"
     "  (still / moving / walking / unknown), activity_g (RMS of dynamic acceleration), peak_g, steps\n"
     "  (since boot), cadence_spm, step_m (estimated step length), speed_mps (walking speed; 0 still;\n"
-    "  empty = moving but unknown), dist_m (walked since boot), axis_deg (main horizontal movement\n"
+    "  empty = moving but unknown), dist_m (walked since boot), rhythm (0-1: how strongly the vertical\n"
+    "  motion repeated at a step/stride period over the last 4 s; walking ~0.6-0.95, vehicle or handling\n"
+    "  ~0.2), axis_deg (main horizontal movement\n"
     "  axis, 0-180 from the device X axis projected horizontally; 180 deg ambiguous; empty = none),\n"
     "  axis_conf (0-1), tilt_deg (device +Z vs up), g (gravity direction x/y/z). No gyroscope or\n"
-    "  compass: there is no absolute heading, and positions are not tracked.\n"
+    "  compass: there is no absolute heading, and positions are not tracked. walking = a steady step\n"
+    "  rhythm (rhythm >= 0.6 for 3 s, with activity); steps and dist_m then accrue from the cadence.\n"
+    "  moving = activity without that rhythm (handling, vehicle, ...).\n"
     "- STATUS: once per second: rps (reports/s), devices (in table), recent (seen in 60 s), drops\n"
     "  (reports lost before processing), log_drops (rows lost before the card), wifi, battery, temperatures.\n"
     "- INFO: clock_set / clock_adjusted (the clock was set or jumped; rows before it have no or old utc),\n"
@@ -555,7 +561,7 @@ void scan_log_motion_row(const motion_status_t *m, int64_t t_us) {
                                 (unsigned)m->steps, (double)m->cadence_spm);
     o = appendf(info, sizeof(info), o, " step_m=%.2f speed_mps=", (double)m->step_m);
     if (m->speed_mps >= 0) o = appendf(info, sizeof(info), o, "%.2f", (double)m->speed_mps);
-    o = appendf(info, sizeof(info), o, " dist_m=%.1f axis_deg=", (double)m->dist_m);
+    o = appendf(info, sizeof(info), o, " dist_m=%.1f rhythm=%.2f axis_deg=", (double)m->dist_m, (double)m->rhythm);
     if (m->axis_deg >= 0) o = appendf(info, sizeof(info), o, "%.0f", (double)m->axis_deg);
     o = appendf(info, sizeof(info), o, " axis_conf=%.2f tilt_deg=%.0f g=%.2f/%.2f/%.2f", (double)m->axis_conf,
                 (double)m->tilt_deg, (double)m->gx, (double)m->gy, (double)m->gz);

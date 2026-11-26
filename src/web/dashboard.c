@@ -429,12 +429,12 @@ static char *build_status_json(void) {
     motion_get_status(&mo);
     off = append(buf, cap, off,
                  "\"motion\":{\"ok\":%s,\"state\":\"%s\",\"rate_hz\":%.2f,\"act\":%.4f,\"peak\":%.3f,"
-                 "\"steps\":%u,\"cad\":%.0f,\"step_m\":%.2f,\"speed\":%.2f,\"dist\":%.1f,\"axis\":%.0f,"
-                 "\"conf\":%.2f,\"tilt\":%.0f,\"g\":[%.2f,%.2f,%.2f],\"dropped\":%u,\"log\":%s,"
+                 "\"steps\":%u,\"cad\":%.0f,\"step_m\":%.2f,\"speed\":%.2f,\"dist\":%.1f,\"rhy\":%.2f,"
+                 "\"axis\":%.0f,\"conf\":%.2f,\"tilt\":%.0f,\"g\":[%.2f,%.2f,%.2f],\"dropped\":%u,\"log\":%s,"
                  "\"range\":%d,\"rows\":%llu,\"mdrops\":%u},",
                  mo.ok ? "true" : "false", motion_state_name(mo.state), (double)mo.rate_hz,
                  (double)mo.activity_g, (double)mo.peak_g, (unsigned)mo.steps, (double)mo.cadence_spm,
-                 (double)mo.step_m, (double)mo.speed_mps, (double)mo.dist_m, (double)mo.axis_deg,
+                 (double)mo.step_m, (double)mo.speed_mps, (double)mo.dist_m, (double)mo.rhythm, (double)mo.axis_deg,
                  (double)mo.axis_conf, (double)mo.tilt_deg, (double)mo.gx, (double)mo.gy, (double)mo.gz,
                  (unsigned)mo.dropped, motion_log_enabled() ? "true" : "false", motion_get_range_g(),
                  (unsigned long long)recorder_get_motion_rows(), (unsigned)recorder_get_motion_drops());

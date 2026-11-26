@@ -777,26 +777,37 @@ flowchart LR
   VibraShock's `accel_cfg`, and a remembered VibraShock high-pass (which would
   remove gravity) can't break tilt or steps.
 - **Per sample.** Gravity = 1 s low-pass of the vector; dynamic acceleration =
-  sample − gravity. Its vertical part (projection on the gravity direction),
-  smoothed over 5 samples, drives step detection. Its horizontal part, in a
+  sample − gravity. Its vertical part (projection on the gravity direction)
+  goes into a 4 s ring (400 samples, PSRAM) for the rhythm detector; a gap in
+  the feed (> 0.2 s) empties it. Its horizontal part, in a
   basis of the board's X axis projected onto the horizontal plane (Y if X is
   near vertical), feeds a 3 s covariance whose principal axis is the movement
   axis (0–180°, confidence = eigenvalue contrast).
-- **Steps.** A peak counts when it exceeds max(0.08 g, 0.35 × recent
-  amplitude), the signal then drops 0.05 g below it, the signal dipped below
-  0 g since the last step, and ≥ 0.28 s passed. Steps count only once 3
-  arrive with intervals of 0.28–2 s (the held ones are then counted too), so
-  isolated bumps don't. Step length = 0.47 · (peak-to-valley in m/s²)^¼
-  (Weinberg), clamped to 0.3–1.4 m.
+- **Walking = rhythm, not peaks.** Once per second, the normalized
+  autocorrelation of the 4 s window over lags 0.3–1.6 s; its best value is the
+  `rhythm` (0–1). The strongest repetition is often the stride (left and right
+  steps differ, especially in a pocket), so the period is halved when it is
+  ≥ 0.75 s or its half also correlates ≥ 0.4. Walking starts after 3 s with
+  rhythm ≥ 0.6 and activity ≥ 0.08 g, continues while ≥ 0.45 and ≥ 0.05 g, and
+  ends after 3 s below. The activity floor matters: a board lying still can
+  reach 0.7 on sensor noise. Cadence = 60 / step period; steps (and distance)
+  accrue as cadence × time while walking, plus the 2 s it took to confirm.
+  Step length = 0.40 · (mean peak-to-valley per step in m/s²)^¼ (Weinberg;
+  0.47 is the waist-worn constant, a pocket swings more), clamped to
+  0.3–1.4 m. (The earlier peak detector could lock up on a bounce right after
+  a step — a confirmed-too-early peak was neither counted nor discarded — and
+  froze the step count on real data.)
 - **Per second.** Activity = RMS of the dynamic acceleration. State: walking
-  if ≥ 2 counted steps in 10 s and one in the last 2 s; still after 2 s below
-  0.02 g; moving above 0.04 g (or right after walking); in between the state
-  holds. Cadence from the step times; speed = mean step length × cadence
+  as above; still after 2 s below 0.02 g; moving above 0.04 g (or right after
+  walking); in between the state holds. Speed = step length × cadence
   (walking only; 0 still; unknown otherwise).
-- **Verified offline** with the real `motion.c` against synthetic data (host
-  gcc + stubs): still, 110 and 90 steps/min walks (step counts exact, cadence
-  ±0.5), irregular handling (no false steps), and a 60° tilted / 30° turned
-  board (axis matched the hand-calculated 164°; it needs ~10 s to settle after
-  a large orientation change).
+- **Verified offline** with the real `motion.c` (host gcc + stubs). On a
+  recorded 55 min `.motion.csv` (board in a pocket/bag: walks, a drive,
+  lying still): 223 s of walking in 8 walks at 90–125 steps/min and
+  1.0–1.6 m/s, none while driving or lying still (the old detector: 0 s, step
+  count frozen). Synthetic data: still, 110 and 90 steps/min walks (94 steps
+  for ~92, cadence ±0.1), irregular handling (no walking), and a 60° tilted /
+  30° turned board (axis matched the hand-calculated 164°; it needs ~10 s to
+  settle after a large orientation change).
 - **Limits.** No gyroscope or magnetometer: no absolute heading, the axis has
   a 180° ambiguity, and position isn't integrated (it drifts within seconds).

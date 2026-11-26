@@ -23,12 +23,26 @@
 #define STILL_G 0.02f           // activity below this ...
 #define STILL_SECONDS 2         // ... for this long = still
 #define MOVING_G 0.04f          // activity above this = moving
-#define STEP_MIN_G 0.08f        // minimum step peak (dynamic vertical acceleration)
-#define STEP_HYST_G 0.05f       // peak is confirmed once the signal falls this far below it
-#define STEP_MIN_S 0.28f        // fastest plausible step interval (~214 steps/min)
-#define STEP_MAX_S 2.0f         // slower than this breaks the rhythm
-#define STEP_RUN 3              // steps in a row before they count
-#define WEINBERG_K 0.47f        // step length = K * (peak-to-valley in m/s^2)^(1/4)
+// Walking = a steady rhythm in the vertical acceleration (normalized
+// autocorrelation over the last 4 s), not single peaks: impacts and bounces in
+// a pocket or bag make individual peaks unreliable, the repetition is not.
+// Tuned on a real 55 min log: walking r = 0.6-0.95 at a 1.0-1.25 s stride,
+// driving / handling r ~ 0.2, a board lying still can reach 0.7 on noise
+// (hence the activity floor).
+#define RHY_WIN 400             // window: 4 s at the ~100 Hz feed
+#define RHY_LAG_MIN 30          // shortest period searched: 0.3 s (200 steps/min)
+#define RHY_LAG_MAX 160         // longest: 1.6 s (a slow stride = 2 steps)
+#define RHY_NLAGS (RHY_LAG_MAX - RHY_LAG_MIN + 1)
+#define RHY_STRIDE_LAG 75       // a best period >= 0.75 s is a stride (2 steps) ...
+#define RHY_HALF_R 0.4f         // ... as is one whose half repeats at least this well
+#define RHY_ON 0.6f             // rhythm needed to start walking ...
+#define WALK_ON_G 0.08f         // ... with at least this activity ...
+#define RHY_ON_SECONDS 3        // ... for this many seconds in a row
+#define RHY_HOLD 0.45f          // walking continues while above this ...
+#define WALK_HOLD_G 0.05f       // ... and this activity,
+#define RHY_OFF_SECONDS 3       // and ends after this many seconds below
+#define WEINBERG_K 0.40f        // step length = K * (peak-to-valley in m/s^2)^(1/4); 0.47 is
+                                // the waist-worn value, a pocket or bag swings more
 #define G_MPS2 9.80665f
 
 static SemaphoreHandle_t s_mux;
@@ -56,8 +70,6 @@ const char *motion_state_name(motion_state_t s) {
 static bool s_init = false;
 static int64_t s_prev_t = 0;
 static float s_g[3];                      // gravity estimate (g)
-static float s_ma[5];                     // vertical moving average
-static int s_ma_i = 0;
 static float s_c11 = 0, s_c22 = 0, s_c12 = 0; // horizontal covariance (EMA)
 
 // Second window.
@@ -67,80 +79,137 @@ static float s_win_peak = 0;
 static uint32_t s_win_n = 0;
 static int s_still_secs = 0;
 
-// Step detector.
-static bool s_can_peak = false;
-static float s_peak = -1e9f, s_valley = 1e9f;
-static int64_t s_peak_t = 0;
-static int64_t s_last_step_t = 0;
-static float s_amp_avg = 0.2f;
-static int s_run = 0;
-static float s_pending_len[STEP_RUN];
-static int64_t s_pending_t[STEP_RUN];
-static int s_npending = 0;
-#define STEP_HIST 16
-static int64_t s_step_t[STEP_HIST];
-static float s_step_len[STEP_HIST];
-static int s_step_i = 0, s_step_count = 0;
+// Rhythm detector. Buffers in PSRAM (allocated in motion_start); NULL = off.
+static float *s_vring;                    // vertical dynamic acceleration, last RHY_WIN samples
+static float *s_vwin;                     // the window, oldest first, mean removed
+static float *s_corr;                     // correlation per lag (RHY_LAG_MIN..RHY_LAG_MAX)
+static int s_vring_i = 0, s_vring_n = 0;
+static bool s_walking = false;
+static int s_rhy_on = 0, s_rhy_off = 0;   // seconds in a row with / without the rhythm
+static float s_cadence = 0, s_step_m = 0; // of the last rhythmic second
+static double s_steps_f = 0;              // step count with its fraction
 
-static void commit_step(int64_t t, float len) {
-    s_step_t[s_step_i] = t;
-    s_step_len[s_step_i] = len;
-    s_step_i = (s_step_i + 1) % STEP_HIST;
-    if (s_step_count < STEP_HIST) s_step_count++;
-    xSemaphoreTake(s_mux, portMAX_DELAY);
-    s_st.steps++;
-    s_st.dist_m += len;
-    xSemaphoreGive(s_mux);
-}
-
-static void on_step(int64_t t, float amp) {
-    float interval = s_last_step_t ? (float)(t - s_last_step_t) / 1e6f : 1e9f;
-    s_last_step_t = t;
-    s_amp_avg = 0.8f * s_amp_avg + 0.2f * amp;
-    float len = WEINBERG_K * powf(amp * G_MPS2, 0.25f);
-    if (len < 0.3f) len = 0.3f;
-    if (len > 1.4f) len = 1.4f;
-    if (interval >= STEP_MIN_S && interval <= STEP_MAX_S) {
-        s_run++;
-    } else {
-        s_run = 1;
-        s_npending = 0;
+// Normalized autocorrelation of the last RHY_WIN vertical samples. Returns the
+// best correlation over the searched periods (0 without a full window); sets
+// *step_lag to the step period in samples (half the best period if that is a
+// stride) and *pv to the mean peak-to-valley per step (g).
+static float rhythm(float *step_lag, float *pv) {
+    *step_lag = 0;
+    *pv = 0;
+    if (s_vring == NULL || s_vring_n < RHY_WIN) {
+        return 0;
     }
-    if (s_run < STEP_RUN) { // not a rhythm yet -- hold it
-        if (s_npending < STEP_RUN) {
-            s_pending_t[s_npending] = t;
-            s_pending_len[s_npending++] = len;
+    const int n = RHY_WIN;
+    float *w = s_vwin;
+    float mean = 0;
+    for (int i = 0; i < n; i++) {
+        w[i] = s_vring[(s_vring_i + i) % n]; // s_vring_i is the oldest sample
+        mean += w[i];
+    }
+    mean /= (float)n;
+    float tot = 0;
+    for (int i = 0; i < n; i++) {
+        w[i] -= mean;
+        tot += w[i] * w[i];
+    }
+    if (tot < 1e-6f) {
+        return 0;
+    }
+    // Energies of the two overlapping parts: head = w[0 .. n-L-1], tail = w[L .. n-1].
+    float head = tot, tail = tot;
+    for (int i = 0; i < RHY_LAG_MIN; i++) {
+        head -= w[n - 1 - i] * w[n - 1 - i];
+        tail -= w[i] * w[i];
+    }
+    int best = RHY_LAG_MIN;
+    float best_r = -1;
+    for (int L = RHY_LAG_MIN; L <= RHY_LAG_MAX; L++) {
+        float dot = 0;
+        for (int i = 0; i + L < n; i++) {
+            dot += w[i] * w[i + L];
         }
-        return;
+        float den = sqrtf(fmaxf(head, 0) * fmaxf(tail, 0));
+        float r = den > 1e-9f ? dot / den : 0;
+        s_corr[L - RHY_LAG_MIN] = r;
+        if (r > best_r) {
+            best_r = r;
+            best = L;
+        }
+        head -= w[n - 1 - L] * w[n - 1 - L];
+        tail -= w[L] * w[L];
     }
-    for (int i = 0; i < s_npending; i++) { // rhythm confirmed: count the held steps too
-        commit_step(s_pending_t[i], s_pending_len[i]);
+    // The strongest repetition is often the stride (left/right steps differ,
+    // especially in a pocket): halve it when it is too slow for one step or
+    // when its half repeats well too.
+    float lag = (float)best;
+    int h = best / 2;
+    if (h >= RHY_LAG_MIN) {
+        float rh = -1;
+        for (int L = h - 5; L <= h + 5; L++) {
+            if (L >= RHY_LAG_MIN && s_corr[L - RHY_LAG_MIN] > rh) rh = s_corr[L - RHY_LAG_MIN];
+        }
+        if (best >= RHY_STRIDE_LAG || rh >= RHY_HALF_R) {
+            lag = (float)best / 2.0f;
+        }
     }
-    s_npending = 0;
-    commit_step(t, len);
+    // Peak-to-valley per step-long chunk of the window, averaged.
+    int p = (int)(lag + 0.5f);
+    float sum = 0;
+    int cnt = 0;
+    for (int k = 0; k + p <= n; k += p) {
+        float lo = w[k], hi = w[k];
+        for (int i = k + 1; i < k + p; i++) {
+            if (w[i] < lo) lo = w[i];
+            if (w[i] > hi) hi = w[i];
+        }
+        sum += hi - lo;
+        cnt++;
+    }
+    *step_lag = lag;
+    *pv = cnt ? sum / (float)cnt : 0;
+    return best_r;
 }
 
-static void detect_step(float v, int64_t t) {
-    if (v < s_valley) s_valley = v;
-    if (v < 0) {
-        s_can_peak = true; // a new peak needs a dip below 0 g first
+// Once per second: walking state from the rhythm; steps and distance accrue
+// from the cadence while walking. Returns the rhythm (0..1) for the status.
+static float update_walking(float act, float *steps_added) {
+    float step_lag, pv;
+    float r = rhythm(&step_lag, &pv);
+    bool rhythmic = step_lag > 0 && r >= (s_walking ? RHY_HOLD : RHY_ON) &&
+                    act >= (s_walking ? WALK_HOLD_G : WALK_ON_G);
+    float cad = 0, len = 0;
+    if (rhythmic) {
+        float rate = accel_capture_get_motion_rate_hz();
+        if (rate < 50.0f || rate > 200.0f) rate = 100.0f;
+        cad = 60.0f * rate / step_lag;
+        len = WEINBERG_K * powf(pv * G_MPS2, 0.25f);
+        if (len < 0.3f) len = 0.3f;
+        if (len > 1.4f) len = 1.4f;
     }
-    if (!s_can_peak) {
-        return;
+    float add = 0;
+    if (!s_walking) {
+        if (!rhythmic) {
+            s_rhy_on = 0;
+        } else if (++s_rhy_on >= RHY_ON_SECONDS) {
+            s_walking = true;
+            s_rhy_off = 0;
+            s_cadence = cad;
+            s_step_m = len;
+            add = (float)(RHY_ON_SECONDS - 1) * cad / 60.0f; // the seconds it took to confirm
+        }
+    } else if (rhythmic) {
+        s_rhy_off = 0;
+        s_cadence = cad;
+        s_step_m = len;
+    } else if (++s_rhy_off >= RHY_OFF_SECONDS) {
+        s_walking = false;
+        s_rhy_on = 0;
     }
-    if (v > s_peak) {
-        s_peak = v;
-        s_peak_t = t;
+    if (s_walking) {
+        add += s_cadence / 60.0f;
     }
-    float thr = fmaxf(STEP_MIN_G, 0.35f * s_amp_avg);
-    if (s_peak > thr && v < s_peak - STEP_HYST_G &&
-        (s_last_step_t == 0 || (float)(s_peak_t - s_last_step_t) / 1e6f >= STEP_MIN_S)) {
-        float amp = s_peak - s_valley;
-        on_step(s_peak_t, amp);
-        s_can_peak = false;
-        s_peak = -1e9f;
-        s_valley = v;
-    }
+    *steps_added = add;
+    return r > 0 ? r : 0;
 }
 
 // Once per second: state, cadence, speed, axis; publish + history + MOTION row.
@@ -151,26 +220,12 @@ static void finish_second(int64_t now) {
     s_win_peak = 0;
     s_win_n = 0;
 
-    // Cadence + step length from committed steps in the last 10 s.
-    int n10 = 0;
-    int64_t first = 0, last = 0;
-    float len_sum = 0;
-    int len_n = 0;
-    for (int i = 0; i < s_step_count; i++) {
-        int idx = (s_step_i - 1 - i + STEP_HIST) % STEP_HIST;
-        int64_t t = s_step_t[idx];
-        if (now - t > 10000000) break;
-        if (n10 == 0) last = t;
-        first = t;
-        n10++;
-        if (len_n < 4) {
-            len_sum += s_step_len[idx];
-            len_n++;
-        }
-    }
-    bool walking = n10 >= 2 && (now - last) <= 2000000;
-    float cadence = (walking && last > first) ? (float)(n10 - 1) * 60e6f / (float)(last - first) : 0;
-    float step_m = len_n ? len_sum / len_n : 0;
+    float steps_added;
+    float rhy = update_walking(act, &steps_added);
+    bool walking = s_walking;
+    float cadence = walking ? s_cadence : 0;
+    float step_m = walking ? s_step_m : 0;
+    s_steps_f += steps_added;
 
     motion_state_t state;
     xSemaphoreTake(s_mux, portMAX_DELAY);
@@ -209,6 +264,9 @@ static void finish_second(int64_t now) {
     xSemaphoreTake(s_mux, portMAX_DELAY);
     s_st.ok = true;
     s_st.state = state;
+    s_st.steps = (uint32_t)s_steps_f;
+    s_st.dist_m += steps_added * step_m;
+    s_st.rhythm = rhy;
     s_st.rate_hz = accel_capture_get_motion_rate_hz();
     s_st.activity_g = act;
     s_st.peak_g = peak;
@@ -238,14 +296,16 @@ static void process(const accel_motion_sample_t *m) {
     float a[3] = {m->x, m->y, m->z};
     if (!s_init) {
         memcpy(s_g, a, sizeof(s_g));
-        for (int i = 0; i < 5; i++) s_ma[i] = 0;
         s_prev_t = m->t_us;
         s_win_end = m->t_us + 1000000;
         s_init = true;
     }
     float dt = (float)(m->t_us - s_prev_t) / 1e6f;
     s_prev_t = m->t_us;
-    if (dt <= 0 || dt > 0.2f) dt = 0.01f; // gap (overrun) or first sample
+    if (dt <= 0 || dt > 0.2f) { // gap (overrun) or first sample
+        dt = 0.01f;
+        s_vring_n = 0;          // the rhythm window must be contiguous
+    }
 
     float ag = dt / (GRAVITY_TAU_S + dt);
     for (int i = 0; i < 3; i++) s_g[i] += ag * (a[i] - s_g[i]);
@@ -261,12 +321,12 @@ static void process(const accel_motion_sample_t *m) {
     float lm = sqrtf(linmag2);
     if (lm > s_win_peak) s_win_peak = lm;
 
-    // Vertical dynamic acceleration, smoothed over 5 samples (~50 ms), -> steps.
-    float v = lin[0] * u[0] + lin[1] * u[1] + lin[2] * u[2];
-    s_ma[s_ma_i] = v;
-    s_ma_i = (s_ma_i + 1) % 5;
-    float vs = (s_ma[0] + s_ma[1] + s_ma[2] + s_ma[3] + s_ma[4]) / 5.0f;
-    detect_step(vs, m->t_us);
+    // Vertical dynamic acceleration -> rhythm window.
+    if (s_vring != NULL) {
+        s_vring[s_vring_i] = lin[0] * u[0] + lin[1] * u[1] + lin[2] * u[2];
+        s_vring_i = (s_vring_i + 1) % RHY_WIN;
+        if (s_vring_n < RHY_WIN) s_vring_n++;
+    }
 
     // Horizontal plane basis: e1 = device X (or Y if X is nearly vertical)
     // projected onto the plane, e2 = up x e1.
@@ -415,6 +475,15 @@ void motion_start(void) {
     // Override whatever VibraShock may have remembered (range/filter) without
     // persisting anything to its namespace.
     accel_capture_set_config_transient(fs_for_g(s_range_g), IIS3DWB_FILTER_OFF, IIS3DWB_HPCF_ODR_4);
+    // Rhythm window + work copy + correlations (~3.7 KB) in PSRAM.
+    float *rb = heap_caps_calloc(2 * RHY_WIN + RHY_NLAGS, sizeof(float), MALLOC_CAP_SPIRAM);
+    if (rb != NULL) {
+        s_vwin = rb + RHY_WIN;
+        s_corr = rb + 2 * RHY_WIN;
+        s_vring = rb; // last: process() checks this one
+    } else {
+        printf("motion: no memory for the rhythm window -- no walking detection\n");
+    }
     // Core 1 at priority 7: below the SD writer (12) and BLE processing (8);
     // the 10 s motion ring absorbs any delay. Stack in PSRAM (internal RAM is
     // scarce); allowed because this task never writes flash.

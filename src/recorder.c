@@ -34,6 +34,7 @@
 // 1 MB (~8 s at a very busy 125 KB/s); the 100 Hz motion file (~3 KB/s) 128 KB.
 #define SCAN_RING_BYTES (1024 * 1024)
 #define MOTION_RING_BYTES (128 * 1024)
+#define LINE_LOCK_WAIT_MS 500 // producers' wait for the line lock before a row counts as dropped
 
 // Periodic durability sync: FATFS commits a file's size/FAT chain only on
 // f_sync/f_close, so this bounds what a power loss or yanked card can cost.
@@ -452,7 +453,11 @@ static bool log_to(channel_t *c, const char *line, size_t len) {
         return false;
     }
     bool ok = false;
-    if (xSemaphoreTakeRecursive(s_line_mux, pdMS_TO_TICKS(20)) == pdTRUE) {
+    // The lock is only ever held for a ring copy, but its holder can be
+    // preempted by the Wi-Fi / network tasks (far higher priority) under web
+    // traffic; 20 ms was too short for that and lost a row. Every producer
+    // (BLE processing, motion, httpd, 1 Hz tick, button) can afford to wait.
+    if (xSemaphoreTakeRecursive(s_line_mux, pdMS_TO_TICKS(LINE_LOCK_WAIT_MS)) == pdTRUE) {
         // All or nothing: a partial line would corrupt the CSV.
         if (c->accept && ring_buffer_free_space(&c->ring) >= len) {
             ring_buffer_write(&c->ring, (const uint8_t *)line, len);
