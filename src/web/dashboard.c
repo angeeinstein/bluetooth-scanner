@@ -2133,11 +2133,19 @@ static void register_handlers(httpd_handle_t server) {
 void dashboard_start(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 12288; // headroom for the TLS handshake in the /version check
-    config.max_uri_handlers = 60; // headroom above the ~51 currently registered (cheap: a pointer array)
+    config.max_uri_handlers = 60; // headroom above the ~54 currently registered (cheap: a pointer array)
     config.max_open_sockets = MAX_WS_CLIENTS;
     config.lru_purge_enable = true;
 
-    ESP_ERROR_CHECK(httpd_start(&s_server, &config));
+    esp_err_t err = httpd_start(&s_server, &config);
+    if (err != ESP_OK) {
+        // Most likely internal RAM for the server task ran out. Say so before
+        // the abort below (which keeps OTA rollback protection).
+        printf("dashboard: httpd_start failed (%s) -- internal heap free %u, largest block %u\n",
+               esp_err_to_name(err), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
+    ESP_ERROR_CHECK(err);
     register_handlers(s_server);
     ws_stream_set_server(s_server);
 

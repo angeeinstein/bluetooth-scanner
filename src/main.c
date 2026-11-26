@@ -13,6 +13,7 @@
 #include "device_report.h"
 #include "esp_chip_info.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_private/esp_clk.h"
 #include "nvs_flash.h"
 #include "ota.h"
@@ -40,6 +41,15 @@ static void print_boot_info(void) {
     printf("=============================================================\n");
 }
 
+// Internal RAM is the tight resource (Wi-Fi + BLE + task stacks): print it at
+// each boot stage, so a "task create failed" can be traced to its cause.
+static void heap_mark(const char *stage) {
+    printf("main: [%s] internal heap free %u, largest block %u, PSRAM free %u\n", stage,
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
 void app_main(void) {
     print_boot_info();
 
@@ -58,6 +68,7 @@ void app_main(void) {
         printf("main: SD card mount failed -- recording will be unavailable\n");
     }
     recorder_start_writer_task();
+    heap_mark("sensor + SD");
 
     if (!power_ctrl_start()) {
         printf("main: charger/power control failed to start -- check I2C wiring\n");
@@ -66,6 +77,7 @@ void app_main(void) {
     if (!wifi_manager_start()) {
         printf("main: Wi-Fi failed to start\n");
     }
+    heap_mark("Wi-Fi");
 
     // After Wi-Fi: the radio is shared (coexistence), and Wi-Fi brings up the
     // coexistence arbiter first. Warn-and-continue like every init above.
@@ -74,6 +86,7 @@ void app_main(void) {
     }
     scan_log_init(); // CSV rows, target rules, 100 % scan mode (works without BLE/SD too)
     motion_start();  // motion profile from the accelerometer (skipped if it's missing)
+    heap_mark("BLE + logging + motion");
 
     device_report_start(); // periodic local-IP reporting to the update server (best-effort)
 
@@ -87,7 +100,9 @@ void app_main(void) {
         printf("main: WebSocket live-stream failed to start\n");
     }
 
+    heap_mark("before dashboard");
     dashboard_start();
+    heap_mark("dashboard");
     power_ctrl_signal_ready();
     scan_log_maybe_autostart(); // optional "log from power-on" (skipped without an SD card)
 

@@ -633,8 +633,11 @@ bool ble_scanner_start(void) {
     ble_hs_cfg.reset_cb = on_reset;
 
     // Core 1, below the accelerometer drain (20) and the SD writer (12): it
-    // only has to keep up on average -- the PSRAM queue absorbs bursts.
-    if (xTaskCreatePinnedToCore(proc_task, "ble_proc", 6144, NULL, 8, NULL, 1) != pdPASS) {
+    // only has to keep up on average -- the PSRAM queue absorbs bursts. Its
+    // stack lives in PSRAM (internal RAM is the scarce resource with Wi-Fi +
+    // BLE); allowed because this task never writes flash (no NVS, no OTA).
+    if (xTaskCreatePinnedToCoreWithCaps(proc_task, "ble_proc", 6144, NULL, 8, NULL, 1, MALLOC_CAP_SPIRAM) !=
+        pdPASS) {
         printf("ble_scanner: could not start processing task\n");
         return false;
     }

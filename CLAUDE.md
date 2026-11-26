@@ -121,7 +121,17 @@ later lower-rate stream. Docs mark what's still inherited from VibraShock.
    board never talks to VibraShock's server. Keep BTScanner's SD files out of
    VibraShock's `/rec` directory.
 
-8. **Changed anything the scan log writes? Update the on-card format doc.** The
+8. **Internal RAM is the real limit, not the build's "RAM: 25 %".** Wi-Fi, the
+   BLE controller, NimBLE and every task stack compete for ~270 KB of internal
+   RAM at runtime; the build figure only counts static data. Running out shows
+   as "task create failed" and then `ESP_ERR_HTTPD_TASK` → abort → boot loop.
+   New tasks that never write flash (no NVS / OTA) get their stack in PSRAM
+   via `xTaskCreatePinnedToCoreWithCaps(..., MALLOC_CAP_SPIRAM)`; Wi-Fi/LWIP
+   buffers prefer PSRAM (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`). The boot log
+   prints `main: [stage] internal heap free ...` at each stage — check it
+   after adding tasks or buffers.
+
+9. **Changed anything the scan log writes? Update the on-card format doc.** The
    firmware writes `s_format_doc` (in [src/scan_log.c](src/scan_log.c), next to
    the CSV header and row formatting) to `/ble/FORMAT.md` on every SD card, and
    scripts/AI agents reading a card rely on it. Any change to the CSV columns or

@@ -106,3 +106,10 @@ CONFIG_BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_NUM=400
 CONFIG_BT_NIMBLE_TRANSPORT_EVT_DISCARD_COUNT=64
 # No duplicate filtering is ever used, so the controller's duplicate cache is dead weight.
 # CONFIG_BT_CTRL_BLE_SCAN_DUPL is not set
+
+# --- Internal RAM budget (BTScanner) -------------------------------------------
+# Wi-Fi + the BLE controller/NimBLE + the web server don't all fit in the
+# S3's internal RAM: boot failed with "task create failed" and
+# ESP_ERR_HTTPD_TASK. Let Wi-Fi and LWIP put their buffers (incl. the 16
+# static TX buffers, ~25 KB) in PSRAM first, internal only as a fallback.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y

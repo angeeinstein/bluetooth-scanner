@@ -9,6 +9,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
+#include "esp_heap_caps.h"
 #include "nvs.h"
 #include "recorder.h"
 #include "scan_log.h"
@@ -414,8 +416,10 @@ void motion_start(void) {
     // persisting anything to its namespace.
     accel_capture_set_config_transient(fs_for_g(s_range_g), IIS3DWB_FILTER_OFF, IIS3DWB_HPCF_ODR_4);
     // Core 1 at priority 7: below the SD writer (12) and BLE processing (8);
-    // the 10 s motion ring absorbs any delay.
-    if (xTaskCreatePinnedToCore(motion_task, "motion", 4096, NULL, 7, NULL, 1) != pdPASS) {
+    // the 10 s motion ring absorbs any delay. Stack in PSRAM (internal RAM is
+    // scarce); allowed because this task never writes flash.
+    if (xTaskCreatePinnedToCoreWithCaps(motion_task, "motion", 4096, NULL, 7, NULL, 1, MALLOC_CAP_SPIRAM) !=
+        pdPASS) {
         printf("motion: could not start task\n");
     }
 }

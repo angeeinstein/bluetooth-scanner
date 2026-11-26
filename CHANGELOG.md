@@ -14,6 +14,13 @@ before that are in the
 
 ## [Unreleased]
 
+### Fixed
+- **Boot loop on real hardware** ("task create failed", then the web server
+  couldn't start and the board rebooted). Wi-Fi + Bluetooth left too little
+  internal RAM for task stacks. Wi-Fi/network buffers and the BLE, scan-log
+  and motion task stacks now use PSRAM; the boot log reports free internal
+  RAM at each stage.
+
 ### Added
 - **BLE scanner.** Scans continuously for Bluetooth Low Energy devices
   (legacy and BLE 5 extended advertising) with no duplicate filter, so every

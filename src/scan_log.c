@@ -17,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "nvs.h"
 #include "power_ctrl.h"
 #include "version.h"
@@ -700,7 +701,12 @@ void scan_log_init(void) {
 
     ble_scanner_set_target_fn(target_fn);
     ble_scanner_set_report_hook(report_hook);
-    xTaskCreate(tick_task, "scan_log", 6144, NULL, 4, NULL);
+    // Stack in PSRAM (internal RAM is scarce with Wi-Fi + BLE). Allowed: this
+    // task never writes flash -- settings are saved from the httpd task.
+    if (xTaskCreatePinnedToCoreWithCaps(tick_task, "scan_log", 6144, NULL, 4, NULL, tskNO_AFFINITY,
+                                        MALLOC_CAP_SPIRAM) != pdPASS) {
+        printf("scan_log: could not start its 1 Hz task\n");
+    }
 }
 
 void scan_log_maybe_autostart(void) {
