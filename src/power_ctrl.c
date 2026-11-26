@@ -200,7 +200,11 @@ static int s_batt_present_count = 0, s_batt_absent_count = 0;
 static bool s_have_last_release = false;
 static int64_t s_last_release_us = 0;
 static int64_t s_last_press_us = 0;        // press time of a pending single-click (marker accuracy)
-static bool s_button_mark_enabled = false; // single click during recording places a marker
+// Single click during logging places a marker. BTScanner's own key
+// ("bts_btn_mark", default on) -- VibraShock's "btn_mark" in this shared
+// namespace defaults to off and is left untouched.
+#define BTN_MARK_KEY "bts_btn_mark"
+static bool s_button_mark_enabled = true;
 
 static bool s_start_pending = false;
 static int64_t s_start_deadline_us = 0;
@@ -907,8 +911,8 @@ bool power_ctrl_start(void) {
     nvs_handle_t nvs_h;
     if (nvs_open(NVS_NS, NVS_READONLY, &nvs_h) == ESP_OK) {
         nvs_get_u8(nvs_h, "ts_ignore", &saved_ts_ignore);
-        uint8_t btn_mark = 0;
-        nvs_get_u8(nvs_h, "btn_mark", &btn_mark);
+        uint8_t btn_mark = 1;
+        nvs_get_u8(nvs_h, BTN_MARK_KEY, &btn_mark);
         s_button_mark_enabled = btn_mark != 0;
         int32_t v;
         if (nvs_get_i32(nvs_h, "batt_nom_mah", &v) == ESP_OK) {
@@ -983,7 +987,7 @@ void power_ctrl_set_button_mark(bool enable) {
     s_button_mark_enabled = enable;
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, "btn_mark", enable ? 1 : 0);
+        nvs_set_u8(h, BTN_MARK_KEY, enable ? 1 : 0);
         nvs_commit(h);
         nvs_close(h);
     }

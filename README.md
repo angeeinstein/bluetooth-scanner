@@ -488,8 +488,8 @@ default 160MHz) for headroom.
 - **Charger CE (IO18)**: driven LOW at boot to enable charging (active-low).
 - **POWER button (IO2)**: no internal pull — the external 100k network already provides the high
   level; enabling the internal pull-up would form a divider and prevent a valid LOW read.
-- **Buttons**: POWER (IO2) double-click starts/stops logging, single click marks, 3 s hold powers
-  off. BOOT (IO0) is unused.
+- **Buttons**: POWER (IO2) double-click starts/stops logging, single click marks (setting, on by
+  default), 3 s hold powers off. BOOT (IO0) is unused.
 - **IIS3DWB SPI**: 8MHz (hard limit is 10MHz), mode 0. ODR is fixed at 26.7kHz — not a tunable
   parameter, it's the only rate this part supports.
 

@@ -647,7 +647,7 @@ const char dashboard_html[] =
 "          <span class=\"k\"><label for=\"button-mark\">Marker on POWER-button click</label></span>\n"
 "          <span class=\"v\"><input type=\"checkbox\" id=\"button-mark\" onchange=\"setButtonMark(this)\"></span>\n"
 "        </div>\n"
-"        <div class=\"sub\" style=\"margin:2px 0 8px\">A single click while logging places a marker row in the log; double-click starts/stops logging; a 3&nbsp;s hold powers off.</div>\n"
+"        <div class=\"sub\" style=\"margin:2px 0 8px\">On by default. A single click while logging places a marker (MARK row, white LED flash); double-click starts/stops logging; a 3&nbsp;s hold powers off.</div>\n"
 "        <div class=\"row\">\n"
 "          <span class=\"k\"><label for=\"log-serial\">Copy every log row to USB serial</label></span>\n"
 "          <span class=\"v\"><input type=\"checkbox\" id=\"log-serial\" onchange=\"setLogConfig('serial', this)\"></span>\n"

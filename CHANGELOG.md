@@ -15,6 +15,10 @@ before that are in the
 ## [Unreleased]
 
 ### Fixed
+- **POWER single click placed no marker** (and gave no white flash): the
+  "Marker on POWER-button click" setting was read from VibraShock's key, which
+  is off by default. BTScanner now keeps its own setting, on by default
+  (Settings → Bluetooth → Logging).
 - **Recordings listed each session's motion file as a second session** named
   `….motion` that showed "ended abruptly" while it kept growing. The motion
   file now belongs to its session.

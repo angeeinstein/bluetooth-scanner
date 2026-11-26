@@ -118,7 +118,8 @@ later lower-rate stream. Docs mark what's still inherited from VibraShock.
    range/filter is applied with `accel_capture_set_config_transient()` so
    `accel_cfg` is never written. The update-server settings use their own
    `bts_ota_cloud` / `bts_dev_report` namespaces on purpose, so a converted
-   board never talks to VibraShock's server. Keep BTScanner's SD files out of
+   board never talks to VibraShock's server. The marker-on-click setting is BTScanner's own
+   `bts_btn_mark` key in `pwr_cfg` (default on), not VibraShock's `btn_mark`. Keep BTScanner's SD files out of
    VibraShock's `/rec` directory.
 
 8. **Internal RAM is the real limit, not the build's "RAM: 25 %".** Wi-Fi, the
