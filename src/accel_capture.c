@@ -32,20 +32,12 @@
 #define PREVIEW_DECIMATION 250
 #define PREVIEW_RING_CAPACITY (256 * sizeof(accel_preview_point_t))
 
-// BTScanner no longer records raw acceleration (recorder.c only drains these
-// rings), so they're kept small until the motion pipeline replaces them.
-#define RECORDING_RING_CAPACITY (128 * 1024)
-
-// Boxcar-decimated recording rate for the optional lower-rate recording
-// mode: 26700Hz / 27 = 988.9Hz (not a round number -- an integer
-// decimation of a fixed 26.7kHz source rarely lands on one; the exact
-// value is what actually gets stored in the recording header, not a
-// rounded label). Raw int16 codes are averaged before rounding back to
-// int16, same crude-but-real anti-aliasing the preview graph's own boxcar
-// decimation already relies on.
-#define RECORDING_DECIM_FACTOR 27
-#define RECORDING_DECIM_RATE_HZ (26700.0f / RECORDING_DECIM_FACTOR)
-#define RECORDING_DECIM_RING_CAPACITY (32 * 1024)
+// Motion feed for motion.c: boxcar average of MOTION_DECIMATION raw samples
+// -> 26.667 kHz / 267 = ~99.9 Hz, each with the esp_timer time of its centre.
+// The boxcar's first null sits at the output rate, a decent anti-alias filter
+// for body motion (well below ~20 Hz). 1024 entries = ~10 s of headroom.
+#define MOTION_DECIMATION 267
+#define MOTION_RING_CAPACITY (1024 * sizeof(accel_motion_sample_t))
 
 // Full-rate (undecimated) stream ring for udp_stream.c -- much smaller than
 // the recording ring since dropping is expected/fine for a live stream
@@ -64,8 +56,7 @@ static iis3dwb_filter_mode_t s_filter = IIS3DWB_FILTER_OFF;
 static iis3dwb_hpcf_t s_hpcf = IIS3DWB_HPCF_ODR_4;
 static bool s_remember_config = false; // persist/restore fs+filter across reboots (opt-in)
 
-static ring_buffer_t s_recording_ring;
-static ring_buffer_t s_recording_decim_ring;
+static ring_buffer_t s_motion_ring;
 static ring_buffer_t s_preview_ring;
 static ring_buffer_t s_stream_ring;
 static ring_buffer_t s_ws_stream_ring;
@@ -93,7 +84,6 @@ static volatile uint32_t s_ring_drops = 0;
 static volatile uint32_t s_stream_ring_drops = 0;
 static volatile uint32_t s_ws_stream_ring_drops = 0;
 static esp_timer_handle_t s_startup_ovr_timer;
-static volatile uint32_t s_recording_decim_ring_drops = 0;
 // Full-scale-saturation (clipping) tally -- a total plus per-axis counts, diffed
 // into a live percentage by accel_capture_get_clip_pct(). See CLIP_THRESHOLD.
 static volatile uint32_t s_clip_total = 0;
@@ -123,8 +113,6 @@ static int64_t s_odr_clean_us = 0;
 static float s_decim_sum_x = 0, s_decim_sum_y = 0, s_decim_sum_z = 0;
 static uint32_t s_decim_count = 0;
 
-static int32_t s_rec_decim_sum_x = 0, s_rec_decim_sum_y = 0, s_rec_decim_sum_z = 0;
-static uint32_t s_rec_decim_count = 0;
 
 // Built-in self-test (see accel_capture_self_test_start()). Datasheet pass
 // window is 800..3200 mg per axis with FS forced to +-4g.
@@ -148,7 +136,14 @@ static void IRAM_ATTR fifo_isr_handler(void *arg) {
 // signal riding the rail (which bounces a few LSB below the exact maximum).
 #define CLIP_THRESHOLD 32600
 
-static void process_entry(const uint8_t *entry) {
+// Motion boxcar state (drain task only).
+static float s_mot_sum_x = 0, s_mot_sum_y = 0, s_mot_sum_z = 0;
+static int s_mot_count = 0;
+static int64_t s_mot_t_first = 0;
+
+// `t_us` = esp_timer time this sample was taken (estimated from the FIFO
+// backlog at read time and the measured ODR -- see accel_drain_task).
+static void process_entry(const uint8_t *entry, int64_t t_us) {
     // entry[0] = tag (unused -- we only ever batch XL data); entry[1..6] =
     // X_L,X_H,Y_L,Y_H,Z_L,Z_H.
     int16_t raw_x = (int16_t)((entry[2] << 8) | entry[1]);
@@ -164,10 +159,7 @@ static void process_entry(const uint8_t *entry) {
     if (raw_z >= CLIP_THRESHOLD || raw_z <= -CLIP_THRESHOLD) s_clip_count[2]++;
 
     int16_t triplet[3] = {raw_x, raw_y, raw_z};
-    size_t written = ring_buffer_write(&s_recording_ring, (const uint8_t *)triplet, sizeof(triplet));
-    if (written < sizeof(triplet)) {
-        s_ring_drops++;
-    }
+    size_t written;
 
     // Full-rate stream ring for udp_stream.c -- fed unconditionally (like
     // the recording ring above), regardless of whether streaming is
@@ -184,31 +176,29 @@ static void process_entry(const uint8_t *entry) {
         s_ws_stream_ring_drops++;
     }
 
-    // Boxcar-decimated recording ring: average RECORDING_DECIM_FACTOR raw
-    // int16 codes (not g-converted -- keeps this ring in the exact same
-    // on-disk format as the full-rate recording ring) and round back to
-    // int16. Fed unconditionally like every other ring; recorder.c decides
-    // whether a given recording actually reads from this one.
-    s_rec_decim_sum_x += raw_x;
-    s_rec_decim_sum_y += raw_y;
-    s_rec_decim_sum_z += raw_z;
-    s_rec_decim_count++;
-    if (s_rec_decim_count >= RECORDING_DECIM_FACTOR) {
-        int16_t decim_triplet[3] = {
-            (int16_t)(s_rec_decim_sum_x / (int32_t)RECORDING_DECIM_FACTOR),
-            (int16_t)(s_rec_decim_sum_y / (int32_t)RECORDING_DECIM_FACTOR),
-            (int16_t)(s_rec_decim_sum_z / (int32_t)RECORDING_DECIM_FACTOR),
+    float sens_g = iis3dwb_sensitivity_mg_per_lsb(s_fs) / 1000.0f;
+
+    // ~100 Hz motion feed (g), timestamped at the centre of its boxcar window.
+    if (s_mot_count == 0) {
+        s_mot_t_first = t_us;
+    }
+    s_mot_sum_x += raw_x * sens_g;
+    s_mot_sum_y += raw_y * sens_g;
+    s_mot_sum_z += raw_z * sens_g;
+    if (++s_mot_count >= MOTION_DECIMATION) {
+        accel_motion_sample_t m = {
+            .t_us = s_mot_t_first + (t_us - s_mot_t_first) / 2,
+            .x = s_mot_sum_x / MOTION_DECIMATION,
+            .y = s_mot_sum_y / MOTION_DECIMATION,
+            .z = s_mot_sum_z / MOTION_DECIMATION,
         };
-        written = ring_buffer_write(&s_recording_decim_ring, (const uint8_t *)decim_triplet,
-                                     sizeof(decim_triplet));
-        if (written < sizeof(decim_triplet)) {
-            s_recording_decim_ring_drops++;
+        if (ring_buffer_write(&s_motion_ring, (const uint8_t *)&m, sizeof(m)) < sizeof(m)) {
+            s_ring_drops++; // motion.c fell behind (or isn't running)
         }
-        s_rec_decim_sum_x = s_rec_decim_sum_y = s_rec_decim_sum_z = 0;
-        s_rec_decim_count = 0;
+        s_mot_sum_x = s_mot_sum_y = s_mot_sum_z = 0;
+        s_mot_count = 0;
     }
 
-    float sens_g = iis3dwb_sensitivity_mg_per_lsb(s_fs) / 1000.0f;
     s_decim_sum_x += raw_x * sens_g;
     s_decim_sum_y += raw_y * sens_g;
     s_decim_sum_z += raw_z * sens_g;
@@ -329,11 +319,17 @@ static void accel_drain_task(void *arg) {
             }
 
             uint16_t to_read = (num_entries > FIFO_WATERMARK) ? FIFO_WATERMARK : num_entries;
+            // The newest FIFO entry was sampled ~now; entry i of the backlog is
+            // (num_entries - 1 - i) sample periods older.
+            int64_t t_read = esp_timer_get_time();
+            float odr = s_measured_odr_hz > 1000.0f ? s_measured_odr_hz : 26667.0f;
+            float period_us = 1e6f / odr;
             if (!iis3dwb_fifo_burst_read(&s_accel, to_read, s_burst_buf)) {
                 break;
             }
             for (uint16_t i = 0; i < to_read; i++) {
-                process_entry(s_burst_buf + (size_t)i * IIS3DWB_FIFO_ENTRY_BYTES);
+                int64_t t = t_read - (int64_t)((float)(num_entries - 1 - i) * period_us);
+                process_entry(s_burst_buf + (size_t)i * IIS3DWB_FIFO_ENTRY_BYTES, t);
             }
 
             if (to_read == num_entries) {
@@ -460,12 +456,8 @@ bool accel_capture_start(void) {
         return false;
     }
 
-    if (!ring_buffer_init(&s_recording_ring, RECORDING_RING_CAPACITY, MALLOC_CAP_SPIRAM)) {
-        printf("accel_capture: failed to allocate recording ring (PSRAM)\n");
-        return false;
-    }
-    if (!ring_buffer_init(&s_recording_decim_ring, RECORDING_DECIM_RING_CAPACITY, MALLOC_CAP_SPIRAM)) {
-        printf("accel_capture: failed to allocate decimated recording ring (PSRAM)\n");
+    if (!ring_buffer_init(&s_motion_ring, MOTION_RING_CAPACITY, MALLOC_CAP_SPIRAM)) {
+        printf("accel_capture: failed to allocate motion ring (PSRAM)\n");
         return false;
     }
     if (!ring_buffer_init(&s_preview_ring, PREVIEW_RING_CAPACITY, MALLOC_CAP_DEFAULT)) {
@@ -742,16 +734,14 @@ void accel_capture_self_test_get_result(accel_selftest_result_t *out) {
     out->state = s_selftest_state;
 }
 
-ring_buffer_t *accel_capture_get_recording_ring(void) {
-    return &s_recording_ring;
+size_t accel_capture_read_motion(accel_motion_sample_t *out, size_t max_samples) {
+    size_t got = ring_buffer_read(&s_motion_ring, (uint8_t *)out, max_samples * sizeof(*out));
+    return got / sizeof(*out);
 }
 
-ring_buffer_t *accel_capture_get_recording_decim_ring(void) {
-    return &s_recording_decim_ring;
-}
-
-float accel_capture_get_recording_decim_rate_hz(void) {
-    return RECORDING_DECIM_RATE_HZ;
+float accel_capture_get_motion_rate_hz(void) {
+    float odr = s_measured_odr_hz > 1000.0f ? s_measured_odr_hz : 26667.0f;
+    return odr / MOTION_DECIMATION;
 }
 
 ring_buffer_t *accel_capture_get_stream_ring(void) {
@@ -784,9 +774,6 @@ uint32_t accel_capture_get_ws_stream_ring_drops(void) {
     return s_ws_stream_ring_drops;
 }
 
-uint32_t accel_capture_get_recording_decim_ring_drops(void) {
-    return s_recording_decim_ring_drops;
-}
 
 float accel_capture_get_measured_odr_hz(void) {
     return s_measured_odr_hz;

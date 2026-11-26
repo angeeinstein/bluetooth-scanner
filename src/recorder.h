@@ -4,7 +4,8 @@
 // remount, free space) and one logging session at a time: a CSV file in
 // /sdcard/ble (never VibraShock's /sdcard/rec, so a card can move between the
 // two firmwares), plus a <base>.log (start/stop events) and a <base>.mark
-// (current marker list) sidecar. What goes into the CSV is scan_log.c's job:
+// (current marker list) sidecar, and optionally <base>.motion.csv (100 Hz
+// acceleration, see motion.c). What goes into the CSV is scan_log.c's job:
 // producers append complete text lines with recorder_log_line(), a PSRAM line
 // buffer absorbs SD stalls, and the SD writer task streams it to the card.
 //
@@ -61,6 +62,12 @@ uint32_t recorder_get_log_drops(void);           // lines lost because the line 
 // never blocks for long. Returns false (and counts a drop if a session is
 // running) when no session accepts lines or the buffer is full.
 bool recorder_log_line(const char *line, size_t len);
+// Same, for the session's 100 Hz motion file (<base>.motion.csv). Only takes
+// lines while that file is open (motion logging enabled in Settings).
+bool recorder_log_motion(const char *line, size_t len);
+bool recorder_is_logging_motion(void);
+uint64_t recorder_get_motion_rows(void);
+uint32_t recorder_get_motion_drops(void);
 
 // --- Markers within a session ---
 // Time-stamped annotations (POWER single click or the dashboard). Each add,

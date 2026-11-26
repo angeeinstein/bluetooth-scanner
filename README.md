@@ -7,11 +7,10 @@ records a motion profile of the device itself from the on-board IIS3DWB accelero
 dashboard, multi-network Wi-Fi, OTA updates, battery/charger handling and status LED carry over
 from VibraShock.
 
-> **Work in progress.** This repo started as a copy of VibraShock 1.6.0. Done: new identity, the
-> BLE scanner with live device list, the SD scan log (every packet as a CSV row), target rules,
-> 100 % scan mode, and a web interface rebuilt around Bluetooth. Next: the accelerometer becomes a
-> ~100 Hz motion log plus still/moving, steps and estimated speed. Sections marked as inherited
-> still describe VibraShock behaviour.
+> This repo started as a copy of VibraShock 1.6.0 and has been reworked into a BLE scanner: live
+> device list, every packet logged as a CSV row, target rules, 100 % scan mode, a motion profile of
+> the board from its accelerometer, and a web interface built around all of that. Sections marked
+> as inherited still describe VibraShock behaviour.
 >
 > The ESP32-S3 radio is **BLE only** — Classic Bluetooth (BR/EDR) devices can't be discovered.
 
@@ -153,12 +152,20 @@ in between; the log records `wifi_off` / `wifi_on` INFO rows.
    logged on its first match in a session and again after it was unseen for 30 s, the LED flashes
    magenta three times, and the Dashboard lists it on top. Address rules only work reliably for
    devices with a fixed address.
-6. **Analyze** — one device in detail: decoded fields, the last advertisement and scan response as
+6. **Motion** — the board's own movement, from the accelerometer alone (no gyroscope or compass):
+   *still / moving / walking*, activity, steps and cadence, estimated walking speed and distance,
+   the main horizontal axis it moves along (relative to the board, 180° ambiguous) and its tilt.
+   Shown in the Dashboard's *Motion* card, as a 10-minute chart in Analyze, as a MOTION row in the
+   log every second, and — if *Log 100 Hz acceleration* is on (Settings → Motion sensor, default
+   on) — as every ~100 Hz sample in `<base>.motion.csv`. It answers "did it stand still or move
+   around, and roughly how"; it does not track position. Speed is only estimated while walking
+   (from step rhythm and step length); in a vehicle the state is just *moving*.
+7. **Analyze** — one device in detail: decoded fields, the last advertisement and scan response as
    hex, its mean RSSI and packets per second over the last 2 minutes (kept on the board, so it's
    there even if the page was closed), and the air-activity chart.
-7. **Recordings** — every logging session with its duration, rows, size and how it ended; download
+8. **Recordings** — every logging session with its duration, rows, size and how it ended; download
    the CSV part(s), `.log` and `.mark`, rename or delete. Files are in `/ble` on the card.
-8. **Settings → Scanning**: *Active scanning* (default on) asks every scannable device for its scan
+9. **Settings → Scanning**: *Active scanning* (default on) asks every scannable device for its scan
    response; off = passive, the scanner never transmits and is invisible to the devices around it.
    *Coded PHY* adds BLE 5 long range, at the cost of fewer packets from ordinary devices.
 
@@ -178,6 +185,8 @@ whenever it changes, so it always matches the board's firmware.
 - `<base>.log` — one line per event (`start`, `rotate`, `stop`, `full`, `error`) with board id,
   firmware, UTC, uptime, bytes, rows, duration and dropped rows. No end line = power loss.
 - `<base>.mark` — the session's marker list (the markers are also rows in the CSV).
+- `<base>.motion.csv` — optional: `uptime_ms, ax_g, ay_g, az_g` at ~100 Hz (gravity included,
+  board frame), on the same clock as the log.
 
 CSV columns: `kind, uptime_ms, utc, addr, addr_kind, rssi, event, props, phy, sid, tx_power,
 data_status, name, name_src, company_id, mfg_data, ad_tx_power, flags, appearance, uuids, svc_data,
@@ -188,6 +197,8 @@ data, target, info`.
   `EXT_SCAN_RSP`). `data` is the complete raw payload as hex; the parsed columns are decoded from
   it. `name` comes from the per-address cache, `name_src` says whether this packet carried it.
   Extended payloads over 255 bytes arrive as several rows (`data_status` 1 = more follows).
+- `MOTION` (once per second): `state`, `activity_g`, `peak_g`, `steps`, `cadence_spm`, `step_m`,
+  `speed_mps`, `dist_m`, `axis_deg`, `axis_conf`, `tilt_deg`, `g` (gravity direction).
 - `TARGET`, `MARK`, `STATUS` (once per second: reports/s, devices, drops, Wi-Fi, battery,
   temperatures), `INFO` (`clock_set`, `clock_adjusted`, `wifi_off`, `wifi_on`, `rules_changed`),
   `START` (scan settings, rules) and `STOP` rows carry key=value pairs in `info`.
@@ -200,7 +211,7 @@ data, target, info`.
 
 ## Live streaming (kept from VibraShock, not in the UI)
 
-The firmware still has VibraShock's two full-rate accelerometer streams — UDP (`POST
+The firmware still has VibraShock's two full-rate (26.7 kHz) accelerometer streams — UDP (`POST
 /api/udp/start`) and the binary WebSocket (`/wsstream`) — and `tools/udp_viewer.py`. They're kept
 on purpose as a basis for a later lower-rate stream (motion data or live sightings), but the web
 interface no longer controls them, and they still carry raw 26.7 kHz accelerometer data. The

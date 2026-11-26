@@ -9,7 +9,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "accel_capture.h"
 #include "device_id.h"
 #include "driver/gpio.h"
 #include "driver/sdmmc_host.h"
@@ -19,6 +18,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "motion.h"
 #include "pins.h"
 #include "ring_buffer.h"
 #include "scan_log.h"
@@ -30,9 +30,10 @@
 #define WRITE_CHUNK_SIZE (32 * 1024)
 // Rotate well below FAT32's 4 GB limit; 1 GB CSVs are still easy to open.
 #define ROTATION_THRESHOLD_BYTES (1024ULL * 1024 * 1024)
-// Line buffer between the producers (scan_log rows) and the SD writer. 1 MB is
-// ~8 s at a very busy 125 KB/s -- far longer than an SD card's worst stall.
-#define LINE_RING_BYTES (1024 * 1024)
+// Line buffers between the producers and the SD writer. The scan log gets
+// 1 MB (~8 s at a very busy 125 KB/s); the 100 Hz motion file (~3 KB/s) 128 KB.
+#define SCAN_RING_BYTES (1024 * 1024)
+#define MOTION_RING_BYTES (128 * 1024)
 
 // Periodic durability sync: FATFS commits a file's size/FAT chain only on
 // f_sync/f_close, so this bounds what a power loss or yanked card can cost.
@@ -50,37 +51,49 @@ typedef enum {
     REC_STOP_REQUESTED,
 } rec_state_t;
 
+// One output stream of a session: its own line buffer and file parts.
+// CH_SCAN = <base>.csv (the scan log), CH_MOTION = <base>.motion.csv.
+typedef enum { CH_SCAN = 0, CH_MOTION = 1, CH_COUNT } ch_id_t;
+
+typedef struct {
+    const char *suffix;             // ".csv" / ".motion.csv"
+    ring_buffer_t ring;
+    bool ring_ok;
+    volatile bool accept;           // lines taken only while this channel's file is open
+    volatile uint32_t drops;        // lines lost because the buffer was full
+    FILE *file;
+    int part;
+    uint64_t part_bytes;
+    volatile uint64_t bytes;        // whole session
+    volatile uint64_t rows;
+    char path[176];
+} channel_t;
+
+static channel_t s_ch[CH_COUNT] = {
+    [CH_SCAN] = {.suffix = ".csv"},
+    [CH_MOTION] = {.suffix = ".motion.csv"},
+};
+
 static bool s_sd_mounted = false;
 static sdmmc_card_t *s_card = NULL;
 
 static volatile rec_state_t s_state = REC_IDLE;
 static volatile bool s_start_requested = false;
 static char s_pending_tag[64] = "";
-static int s_part = 1;
 // Shared file-name base of the session ("<ts>_<tag>" or "log_<seq>_<tag>"),
 // computed once; every rotation part reuses it with "_partN" appended.
 static char s_base[100] = "";
 
-static FILE *s_file = NULL;
 static FILE *s_sidecar = NULL; // <base>.log
-static char s_current_filename[176] = "";
-static volatile uint64_t s_bytes_written = 0; // whole session
-static volatile uint64_t s_part_bytes = 0;
-static volatile uint64_t s_rows_written = 0;
 static int64_t s_session_start_us = 0;
 static int64_t s_session_end_us = 0;
 static int64_t s_last_fsync_us = 0;
 
-// Line buffer. Producers (several tasks) take s_line_mux; the writer task is
-// the single consumer. s_accept gates which lines are taken: true only while
-// a session is open, so nothing is buffered when idle.
-static ring_buffer_t s_lines;
-static bool s_lines_ok = false;
-static SemaphoreHandle_t s_line_mux = NULL; // recursive: session callbacks log while it's held
-static volatile bool s_accept = false;
-static volatile uint32_t s_log_drops = 0;
+// Producers (several tasks) take s_line_mux; the writer task is the single
+// consumer of both rings. Recursive: session callbacks log while it's held.
+static SemaphoreHandle_t s_line_mux = NULL;
 
-// Write-rate estimate (bytes/s over ~10 s), for the "SD time left" readouts.
+// Write-rate estimate (bytes/s over ~10 s, both files), for "SD time left".
 static float s_rate_bps = 0.0f;
 static int64_t s_rate_t0 = 0;
 static uint64_t s_rate_b0 = 0;
@@ -100,6 +113,10 @@ static SemaphoreHandle_t s_stop_done_sem;
 static void set_error(const char *msg) {
     snprintf(s_last_error, sizeof(s_last_error), "%s", msg);
     s_last_error_at_us = esp_timer_get_time();
+}
+
+static uint64_t total_bytes(void) {
+    return s_ch[CH_SCAN].bytes + s_ch[CH_MOTION].bytes;
 }
 
 // --- File naming -------------------------------------------------------------
@@ -160,17 +177,17 @@ static void compute_base(const char *tag) {
     }
 }
 
-static void part_path(int part, char *out, size_t out_len) {
+static void part_path(const channel_t *c, int part, char *out, size_t out_len) {
     if (part <= 1) {
-        snprintf(out, out_len, RECORDER_DIR "/%s.csv", s_base);
+        snprintf(out, out_len, RECORDER_DIR "/%s%s", s_base, c->suffix);
     } else {
-        snprintf(out, out_len, RECORDER_DIR "/%s_part%d.csv", s_base, part);
+        snprintf(out, out_len, RECORDER_DIR "/%s_part%d%s", s_base, part, c->suffix);
     }
 }
 
 // --- Sidecar (.log) ------------------------------------------------------------
 
-static void sidecar_line(const char *event) {
+static void sidecar_line(const char *event, const channel_t *c) {
     if (s_sidecar == NULL) {
         return;
     }
@@ -182,66 +199,72 @@ static void sidecar_line(const char *event) {
         strftime(utc, sizeof(utc), "%Y-%m-%dT%H:%M:%SZ", &tm_info);
     }
     double dur = s_session_start_us > 0 ? (double)(esp_timer_get_time() - s_session_start_us) / 1e6 : 0;
-    fprintf(s_sidecar, "%s part=%d dev=%s fw=%s utc=%s uptime_ms=%lld bytes=%llu rows=%llu dur_s=%.1f log_drops=%u\n",
-            event, s_part, devid, FIRMWARE_VERSION, utc[0] ? utc : "-",
-            (long long)(esp_timer_get_time() / 1000), (unsigned long long)s_bytes_written,
-            (unsigned long long)s_rows_written, dur, (unsigned)s_log_drops);
+    const channel_t *scan = &s_ch[CH_SCAN];
+    fprintf(s_sidecar,
+            "%s file=%s part=%d dev=%s fw=%s utc=%s uptime_ms=%lld bytes=%llu rows=%llu dur_s=%.1f "
+            "log_drops=%u motion_rows=%llu motion_drops=%u\n",
+            event, c ? c->suffix + 1 : "csv", c ? c->part : scan->part, devid, FIRMWARE_VERSION,
+            utc[0] ? utc : "-", (long long)(esp_timer_get_time() / 1000), (unsigned long long)total_bytes(),
+            (unsigned long long)scan->rows, dur, (unsigned)scan->drops,
+            (unsigned long long)s_ch[CH_MOTION].rows, (unsigned)s_ch[CH_MOTION].drops);
     fflush(s_sidecar);
     fsync(fileno(s_sidecar)); // commit now, so a power cut keeps the line
 }
 
 // --- Part files --------------------------------------------------------------
 
-static bool open_part(int part) {
-    char path[176];
-    part_path(part, path, sizeof(path));
-    s_file = fopen(path, "wb");
-    if (s_file == NULL) {
+static const char *channel_header(const channel_t *c) {
+    return c == &s_ch[CH_MOTION] ? scan_log_motion_csv_header() : scan_log_csv_header();
+}
+
+static bool open_part(channel_t *c, int part) {
+    part_path(c, part, c->path, sizeof(c->path));
+    c->file = fopen(c->path, "wb");
+    if (c->file == NULL) {
         char msg[64];
         snprintf(msg, sizeof(msg), "open failed (errno=%d %s)", errno, strerror(errno));
         set_error(msg);
-        printf("recorder: failed to open %s (errno=%d)\n", path, errno);
+        printf("recorder: failed to open %s (errno=%d)\n", c->path, errno);
         return false;
     }
-    snprintf(s_current_filename, sizeof(s_current_filename), "%s", path);
-    s_part = part;
-    s_part_bytes = 0;
+    c->part = part;
+    c->part_bytes = 0;
     // Every part starts with the column header, so each one opens on its own.
-    const char *hdr = scan_log_csv_header();
+    const char *hdr = channel_header(c);
     size_t hl = strlen(hdr);
-    fwrite(hdr, 1, hl, s_file);
-    s_part_bytes += hl;
-    s_bytes_written += hl;
-    s_last_fsync_us = esp_timer_get_time();
+    fwrite(hdr, 1, hl, c->file);
+    c->part_bytes += hl;
+    c->bytes += hl;
     return true;
 }
 
-static void close_part(void) {
-    if (s_file != NULL) {
-        fflush(s_file);
-        fsync(fileno(s_file));
-        fclose(s_file);
-        s_file = NULL;
+static void close_part(channel_t *c) {
+    if (c->file != NULL) {
+        fflush(c->file);
+        fsync(fileno(c->file));
+        fclose(c->file);
+        c->file = NULL;
     }
 }
 
 static void sync_files(void) {
-    if (s_file != NULL) {
-        fflush(s_file);
-        fsync(fileno(s_file));
+    for (int i = 0; i < CH_COUNT; i++) {
+        if (s_ch[i].file != NULL) {
+            fflush(s_ch[i].file);
+            fsync(fileno(s_ch[i].file));
+        }
     }
     s_last_fsync_us = esp_timer_get_time();
 }
 
-// Writes `n` bytes of complete-or-partial lines. Rotation only ever happens at
-// a line boundary, so no row is split across two parts.
-static bool write_data(const uint8_t *buf, size_t n, int *err_out) {
+// Writes `n` bytes of lines to channel `c`. Rotation only ever happens at a
+// line boundary, so no row is split across two parts.
+static bool write_data(channel_t *c, const uint8_t *buf, size_t n, int *err_out) {
     size_t off = 0;
     while (off < n) {
         size_t len = n - off;
         bool rotate = false;
-        if (s_part_bytes + len >= ROTATION_THRESHOLD_BYTES) {
-            // Write up to (and including) the last newline in this piece, then rotate.
+        if (c->part_bytes + len >= ROTATION_THRESHOLD_BYTES) {
             size_t k = len;
             while (k > 0 && buf[off + k - 1] != '\n') {
                 k--;
@@ -251,25 +274,25 @@ static bool write_data(const uint8_t *buf, size_t n, int *err_out) {
                 rotate = true;
             }
         }
-        size_t w = fwrite(buf + off, 1, len, s_file);
-        s_bytes_written += w;
-        s_part_bytes += w;
+        size_t w = fwrite(buf + off, 1, len, c->file);
+        c->bytes += w;
+        c->part_bytes += w;
         if (w < len) {
             *err_out = errno;
             return false;
         }
         for (size_t i = 0; i < len; i++) {
-            s_rows_written += (buf[off + i] == '\n');
+            c->rows += (buf[off + i] == '\n');
         }
         off += len;
         if (rotate) {
-            sidecar_line("rotate");
-            close_part();
-            if (!open_part(s_part + 1)) {
+            sidecar_line("rotate", c);
+            close_part(c);
+            if (!open_part(c, c->part + 1)) {
                 *err_out = errno;
                 return false;
             }
-            sidecar_line("start");
+            sidecar_line("start", c);
         }
     }
     return true;
@@ -279,18 +302,27 @@ static bool write_data(const uint8_t *buf, size_t n, int *err_out) {
 
 static void session_open(void) {
     compute_base(s_pending_tag);
-    s_bytes_written = 0;
-    s_rows_written = 0;
-    s_log_drops = 0;
-    if (!open_part(1)) {
+    for (int i = 0; i < CH_COUNT; i++) {
+        s_ch[i].bytes = 0;
+        s_ch[i].rows = 0;
+        s_ch[i].drops = 0;
+        s_ch[i].file = NULL;
+    }
+    if (!open_part(&s_ch[CH_SCAN], 1)) {
         s_state = REC_IDLE;
         return;
+    }
+    // The 100 Hz motion file is optional (Settings) and never stops the scan log.
+    bool motion = motion_log_enabled() && s_ch[CH_MOTION].ring_ok && open_part(&s_ch[CH_MOTION], 1);
+    if (!motion && motion_log_enabled()) {
+        s_last_error[0] = '\0'; // a failed motion open isn't a session error
     }
     char path[176];
     snprintf(path, sizeof(path), RECORDER_DIR "/%s.log", s_base);
     s_sidecar = fopen(path, "a");
     s_session_start_us = esp_timer_get_time();
     s_session_end_us = 0;
+    s_last_fsync_us = s_session_start_us;
     s_rate_t0 = s_session_start_us;
     s_rate_b0 = 0;
     s_rate_bps = 0;
@@ -301,97 +333,104 @@ static void session_open(void) {
     snprintf(s_marker_path, sizeof(s_marker_path), RECORDER_DIR "/%s.mark", s_base);
     xSemaphoreGive(s_marker_mutex);
 
-    sidecar_line("start");
+    sidecar_line("start", NULL);
     // Accept lines from here on; the START row goes in first, under the line
     // lock, so no scan row can get ahead of it.
     xSemaphoreTakeRecursive(s_line_mux, portMAX_DELAY);
-    s_accept = true;
+    s_ch[CH_SCAN].accept = true;
+    s_ch[CH_MOTION].accept = motion;
     scan_log_session_begin(s_base);
     xSemaphoreGiveRecursive(s_line_mux);
     s_state = REC_RECORDING;
-    printf("recorder: logging to %s\n", s_current_filename);
+    printf("recorder: logging to %s%s\n", s_ch[CH_SCAN].path, motion ? " (+ motion)" : "");
 }
 
 static void session_close(const char *reason, uint8_t *chunk) {
     xSemaphoreTakeRecursive(s_line_mux, portMAX_DELAY);
     scan_log_session_end(reason);
-    s_accept = false; // nothing more after the STOP row
+    for (int i = 0; i < CH_COUNT; i++) {
+        s_ch[i].accept = false; // nothing more after the STOP row
+    }
     xSemaphoreGiveRecursive(s_line_mux);
     // Flush what's still buffered (best-effort if the card is the problem).
-    if (s_file != NULL) {
+    for (int i = 0; i < CH_COUNT; i++) {
+        channel_t *c = &s_ch[i];
         size_t n;
         int err = 0;
-        while ((n = ring_buffer_read(&s_lines, chunk, WRITE_CHUNK_SIZE)) > 0) {
-            if (!write_data(chunk, n, &err)) {
+        while (c->ring_ok && (n = ring_buffer_read(&c->ring, chunk, WRITE_CHUNK_SIZE)) > 0) {
+            if (c->file == NULL || !write_data(c, chunk, n, &err)) {
                 break;
             }
         }
     }
     s_session_end_us = esp_timer_get_time();
-    sidecar_line(reason);
+    sidecar_line(reason, NULL);
     if (s_sidecar != NULL) {
         fclose(s_sidecar);
         s_sidecar = NULL;
     }
-    close_part();
+    for (int i = 0; i < CH_COUNT; i++) {
+        close_part(&s_ch[i]);
+    }
     s_state = REC_IDLE;
     xSemaphoreGive(s_stop_done_sem);
-    printf("recorder: session ended (%s), %llu rows\n", reason, (unsigned long long)s_rows_written);
+    printf("recorder: session ended (%s), %llu rows\n", reason, (unsigned long long)s_ch[CH_SCAN].rows);
+}
+
+// Ends the session after a failed write on any channel.
+static void fail_session(int err, uint8_t *chunk) {
+    xSemaphoreTakeRecursive(s_line_mux, portMAX_DELAY);
+    for (int i = 0; i < CH_COUNT; i++) {
+        s_ch[i].accept = false;
+    }
+    xSemaphoreGiveRecursive(s_line_mux);
+    if (err == ENOSPC) {
+        snprintf(s_last_notice, sizeof(s_last_notice), "SD card full - logging stopped and saved");
+        printf("recorder: SD card full -- session stopped\n");
+        session_close("full", chunk);
+    } else {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "write failed (errno=%d %s)", err, strerror(err));
+        set_error(msg);
+        printf("recorder: %s -- stopping\n", msg);
+        session_close("error", chunk);
+    }
 }
 
 static void sd_writer_task(void *arg) {
     (void)arg;
     uint8_t *chunk = heap_caps_malloc(WRITE_CHUNK_SIZE, MALLOC_CAP_DEFAULT);
-    uint8_t *scratch = heap_caps_malloc(4096, MALLOC_CAP_DEFAULT);
-    // The accelerometer still fills its recording rings until the motion
-    // pipeline replaces them (rework step 4). Keep draining them so capture
-    // never backs up -- the data itself isn't recorded any more.
-    ring_buffer_t *accel_full = accel_capture_get_recording_ring();
-    ring_buffer_t *accel_decim = accel_capture_get_recording_decim_ring();
 
     for (;;) {
-        if (accel_full != NULL) {
-            while (ring_buffer_read(accel_full, scratch, 4096) > 0) {
-            }
-        }
-        if (accel_decim != NULL) {
-            while (ring_buffer_read(accel_decim, scratch, 4096) > 0) {
-            }
-        }
-
         if (s_start_requested) {
             s_start_requested = false;
             session_open();
         }
 
-        size_t n = 0;
-        if (s_state != REC_IDLE && s_file != NULL) {
-            n = ring_buffer_read(&s_lines, chunk, WRITE_CHUNK_SIZE);
-            if (n > 0) {
+        size_t moved = 0;
+        if (s_state != REC_IDLE) {
+            bool failed = false;
+            for (int i = 0; i < CH_COUNT && !failed; i++) {
+                channel_t *c = &s_ch[i];
+                if (c->file == NULL || !c->ring_ok) continue;
+                size_t n = ring_buffer_read(&c->ring, chunk, WRITE_CHUNK_SIZE);
+                if (n == 0) continue;
+                moved += n;
                 int err = 0;
-                if (!write_data(chunk, n, &err)) {
-                    xSemaphoreTakeRecursive(s_line_mux, portMAX_DELAY);
-                    s_accept = false;
-                    xSemaphoreGiveRecursive(s_line_mux);
-                    if (err == ENOSPC) {
-                        snprintf(s_last_notice, sizeof(s_last_notice), "SD card full - logging stopped and saved");
-                        printf("recorder: SD card full -- session stopped\n");
-                        session_close("full", chunk);
-                    } else {
-                        char msg[64];
-                        snprintf(msg, sizeof(msg), "write failed (errno=%d %s)", err, strerror(err));
-                        set_error(msg);
-                        printf("recorder: %s -- stopping\n", msg);
-                        session_close("error", chunk);
-                    }
-                    continue;
+                if (!write_data(c, chunk, n, &err)) {
+                    fail_session(err, chunk);
+                    failed = true;
                 }
+            }
+            if (failed) {
+                continue;
             }
             int64_t now = esp_timer_get_time();
             if (now - s_rate_t0 >= 10000000) {
-                s_rate_bps = (float)(s_bytes_written - s_rate_b0) * 1e6f / (float)(now - s_rate_t0);
+                uint64_t b = total_bytes();
+                s_rate_bps = (float)(b - s_rate_b0) * 1e6f / (float)(now - s_rate_t0);
                 s_rate_t0 = now;
-                s_rate_b0 = s_bytes_written;
+                s_rate_b0 = b;
             }
             if (now - s_last_fsync_us >= (int64_t)FSYNC_INTERVAL_MS * 1000) {
                 sync_files();
@@ -400,33 +439,39 @@ static void sd_writer_task(void *arg) {
                 session_close("stop", chunk);
                 continue;
             }
-        } else if (s_state == REC_STOP_REQUESTED) {
-            session_close("stop", chunk);
         }
 
-        if (n == 0) {
+        if (moved == 0) {
             vTaskDelay(pdMS_TO_TICKS(20));
         }
     }
 }
 
-bool recorder_log_line(const char *line, size_t len) {
-    if (!s_lines_ok || !s_accept) {
+static bool log_to(channel_t *c, const char *line, size_t len) {
+    if (!c->ring_ok || !c->accept) {
         return false;
     }
     bool ok = false;
     if (xSemaphoreTakeRecursive(s_line_mux, pdMS_TO_TICKS(20)) == pdTRUE) {
         // All or nothing: a partial line would corrupt the CSV.
-        if (s_accept && ring_buffer_free_space(&s_lines) >= len) {
-            ring_buffer_write(&s_lines, (const uint8_t *)line, len);
+        if (c->accept && ring_buffer_free_space(&c->ring) >= len) {
+            ring_buffer_write(&c->ring, (const uint8_t *)line, len);
             ok = true;
         }
         xSemaphoreGiveRecursive(s_line_mux);
     }
-    if (!ok && s_accept) {
-        s_log_drops++;
+    if (!ok && c->accept) {
+        c->drops++;
     }
     return ok;
+}
+
+bool recorder_log_line(const char *line, size_t len) {
+    return log_to(&s_ch[CH_SCAN], line, len);
+}
+
+bool recorder_log_motion(const char *line, size_t len) {
+    return log_to(&s_ch[CH_MOTION], line, len);
 }
 
 // --- FORMAT.md -----------------------------------------------------------------
@@ -482,7 +527,7 @@ static bool mount_sd_card(void) {
 
     esp_vfs_fat_mount_config_t mount_config = {
         .format_if_mount_failed = false,
-        .max_files = 8, // session .csv/.log + marker save + downloads
+        .max_files = 8, // session .csv/.motion.csv/.log + marker save + downloads
         .allocation_unit_size = WRITE_CHUNK_SIZE,
     };
 
@@ -541,8 +586,9 @@ bool recorder_init(void) {
     s_stop_done_sem = xSemaphoreCreateBinary();
     s_marker_mutex = xSemaphoreCreateMutex();
     s_line_mux = xSemaphoreCreateRecursiveMutex();
-    s_lines_ok = ring_buffer_init(&s_lines, LINE_RING_BYTES, MALLOC_CAP_SPIRAM);
-    if (!s_lines_ok) {
+    s_ch[CH_SCAN].ring_ok = ring_buffer_init(&s_ch[CH_SCAN].ring, SCAN_RING_BYTES, MALLOC_CAP_SPIRAM);
+    s_ch[CH_MOTION].ring_ok = ring_buffer_init(&s_ch[CH_MOTION].ring, MOTION_RING_BYTES, MALLOC_CAP_SPIRAM);
+    if (!s_ch[CH_SCAN].ring_ok) {
         printf("recorder: no memory for the line buffer -- logging unavailable\n");
     }
     mount_sd_card(); // failure is fine -- just means "no card yet"
@@ -554,7 +600,7 @@ bool recorder_is_sd_mounted(void) {
     return s_sd_mounted;
 }
 
-bool recorder_get_sd_space(uint64_t *total_bytes, uint64_t *free_bytes) {
+bool recorder_get_sd_space(uint64_t *total_bytes_out, uint64_t *free_bytes) {
     static uint64_t cached_total = 0, cached_free = 0;
     static int64_t last_query_us = 0;
     static bool valid = false;
@@ -573,7 +619,7 @@ bool recorder_get_sd_space(uint64_t *total_bytes, uint64_t *free_bytes) {
         last_query_us = now;
         valid = true;
     }
-    if (total_bytes) *total_bytes = cached_total;
+    if (total_bytes_out) *total_bytes_out = cached_total;
     if (free_bytes) *free_bytes = cached_free;
     return true;
 }
@@ -724,7 +770,7 @@ int recorder_marker_count(void) {
 // --- Control / status ------------------------------------------------------------------
 
 bool recorder_start_writer_task(void) {
-    // Core 1, below the accelerometer drain (20), above the BLE processing task (8).
+    // Core 1, below the accelerometer drain (20), above BLE processing (8) and motion (7).
     return xTaskCreatePinnedToCore(sd_writer_task, "sd_writer", 8192, NULL, 12, NULL, 1) == pdPASS;
 }
 
@@ -737,7 +783,7 @@ bool recorder_request_start(const char *name_tag) {
         set_error("SD card not mounted");
         return false;
     }
-    if (!s_lines_ok) {
+    if (!s_ch[CH_SCAN].ring_ok) {
         set_error("no memory for the log buffer");
         return false;
     }
@@ -768,16 +814,24 @@ bool recorder_is_recording(void) {
     return s_state != REC_IDLE;
 }
 
+bool recorder_is_logging_motion(void) {
+    return s_state != REC_IDLE && s_ch[CH_MOTION].accept;
+}
+
 const char *recorder_get_current_filename(void) {
-    return (s_state != REC_IDLE) ? s_current_filename : "";
+    return (s_state != REC_IDLE) ? s_ch[CH_SCAN].path : "";
 }
 
 uint64_t recorder_get_bytes_written(void) {
-    return s_bytes_written;
+    return total_bytes();
 }
 
 uint64_t recorder_get_rows_written(void) {
-    return s_rows_written;
+    return s_ch[CH_SCAN].rows;
+}
+
+uint64_t recorder_get_motion_rows(void) {
+    return s_ch[CH_MOTION].rows;
 }
 
 double recorder_get_elapsed_s(void) {
@@ -796,11 +850,15 @@ float recorder_get_bytes_per_s(void) {
         return s_rate_bps;
     }
     double el = recorder_get_elapsed_s(); // first 10 s: average since start
-    return el > 0.5 ? (float)(s_bytes_written / el) : 0;
+    return el > 0.5 ? (float)(total_bytes() / el) : 0;
 }
 
 uint32_t recorder_get_log_drops(void) {
-    return s_log_drops;
+    return s_ch[CH_SCAN].drops;
+}
+
+uint32_t recorder_get_motion_drops(void) {
+    return s_ch[CH_MOTION].drops;
 }
 
 const char *recorder_get_last_error(void) {

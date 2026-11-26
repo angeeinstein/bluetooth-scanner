@@ -1,14 +1,14 @@
 // BTScanner firmware: Bluetooth (BLE) scanner / logger for the ESP32-S3 board
-// originally built as the VibraShock vibration recorder (same hardware). Being
-// reworked from the recorder: it still captures the IIS3DWB accelerometer,
-// records to the SD card, and serves a web dashboard (live graph, recording
-// control, SD benchmark, charger status/control, Wi-Fi setup); BLE scanning
-// and logging replace the vibration features step by step.
+// originally built as the VibraShock vibration recorder (same hardware). Scans
+// BLE continuously, logs every report to the SD card, derives a motion profile
+// of the board itself from the IIS3DWB accelerometer, and serves a web
+// dashboard (devices, logging, analysis, Wi-Fi, charger, firmware update).
 
 #include <stdio.h>
 
 #include "accel_capture.h"
 #include "ble_scanner.h"
+#include "motion.h"
 #include "device_id.h"
 #include "device_report.h"
 #include "esp_chip_info.h"
@@ -73,6 +73,7 @@ void app_main(void) {
         printf("main: BLE scanner failed to start\n");
     }
     scan_log_init(); // CSV rows, target rules, 100 % scan mode (works without BLE/SD too)
+    motion_start();  // motion profile from the accelerometer (skipped if it's missing)
 
     device_report_start(); // periodic local-IP reporting to the update server (best-effort)
 

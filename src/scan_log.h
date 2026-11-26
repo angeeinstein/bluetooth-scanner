@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "motion.h"
 #include "recorder.h"
 
 // Registers the scanner hooks, loads settings + rules, starts the 1 Hz task.
@@ -25,10 +26,14 @@ void scan_log_maybe_autostart(void);
 
 // --- Called by recorder.c -------------------------------------------------
 const char *scan_log_csv_header(void); // first line of every CSV part
+const char *scan_log_motion_csv_header(void); // first line of every .motion.csv part
 const char *scan_log_format_doc(void); // RECORDER_DIR/FORMAT.md contents
 void scan_log_session_begin(const char *base); // writes the START row
 void scan_log_session_end(const char *reason); // writes the STOP row
 void scan_log_marker_event(const recorder_marker_t *m, const char *action); // "add" / "note" / "delete"
+
+// --- Called by motion.c once per second ---------------------------------------
+void scan_log_motion_row(const motion_status_t *m, int64_t t_us); // writes a MOTION row
 
 // --- Settings (persisted in NVS "bts_log") -----------------------------------
 typedef struct {

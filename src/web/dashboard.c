@@ -16,6 +16,7 @@
 
 #include "accel_capture.h"
 #include "ble_scanner.h"
+#include "motion.h"
 #include "scan_log.h"
 #include "dashboard_html.h"
 #include "sync_trigger.h"
@@ -417,29 +418,26 @@ static char *build_status_json(void) {
 
     float accel_temp_c = 0;
     bool accel_temp_valid = accel_capture_read_temp_c(&accel_temp_c);
-    float clip[3];
-    accel_capture_get_clip_pct(clip);
     off = append(buf, cap, off,
-                 "\"accel\":{\"ready\":%s,\"fs_g\":%.0f,\"lpf2\":%s,"
-                 "\"filter\":%d,\"cutoff\":%d,\"cutoff_hz\":%d,"
-                 "\"sensor_overruns\":%u,\"ring_drops\":%u,\"decim_rate_hz\":%.1f,"
-                 "\"measured_odr_hz\":%.1f,\"overrun_lost\":%u,\"samples_total\":%llu,"
-                 "\"temp_c\":%.1f,\"temp_valid\":%s,\"remember_config\":%s,"
-                 "\"clip\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}},",
-                 accel_capture_is_ready() ? "true" : "false",
-                 (double)fs_enum_to_g(accel_capture_get_fs()),
-                 accel_capture_get_lpf2() ? "true" : "false",
-                 (int)accel_capture_get_filter_mode(), (int)accel_capture_get_hpcf(),
-                 iis3dwb_hpcf_cutoff_hz(accel_capture_get_hpcf()),
-                 (unsigned)accel_capture_get_sensor_overruns(),
-                 (unsigned)accel_capture_get_ring_drops(),
-                 (double)accel_capture_get_recording_decim_rate_hz(),
-                 (double)accel_capture_get_measured_odr_hz(),
-                 (unsigned)accel_capture_get_overrun_lost_samples(),
-                 (unsigned long long)accel_capture_get_samples_total(),
-                 (double)accel_temp_c, accel_temp_valid ? "true" : "false",
-                 accel_capture_get_remember_config() ? "true" : "false",
-                 (double)clip[0], (double)clip[1], (double)clip[2]);
+                 "\"accel\":{\"ready\":%s,\"fs_g\":%.0f,\"sensor_overruns\":%u,\"measured_odr_hz\":%.1f,"
+                 "\"temp_c\":%.1f,\"temp_valid\":%s},",
+                 accel_capture_is_ready() ? "true" : "false", (double)fs_enum_to_g(accel_capture_get_fs()),
+                 (unsigned)accel_capture_get_sensor_overruns(), (double)accel_capture_get_measured_odr_hz(),
+                 (double)accel_temp_c, accel_temp_valid ? "true" : "false");
+
+    motion_status_t mo;
+    motion_get_status(&mo);
+    off = append(buf, cap, off,
+                 "\"motion\":{\"ok\":%s,\"state\":\"%s\",\"rate_hz\":%.2f,\"act\":%.4f,\"peak\":%.3f,"
+                 "\"steps\":%u,\"cad\":%.0f,\"step_m\":%.2f,\"speed\":%.2f,\"dist\":%.1f,\"axis\":%.0f,"
+                 "\"conf\":%.2f,\"tilt\":%.0f,\"g\":[%.2f,%.2f,%.2f],\"dropped\":%u,\"log\":%s,"
+                 "\"range\":%d,\"rows\":%llu,\"mdrops\":%u},",
+                 mo.ok ? "true" : "false", motion_state_name(mo.state), (double)mo.rate_hz,
+                 (double)mo.activity_g, (double)mo.peak_g, (unsigned)mo.steps, (double)mo.cadence_spm,
+                 (double)mo.step_m, (double)mo.speed_mps, (double)mo.dist_m, (double)mo.axis_deg,
+                 (double)mo.axis_conf, (double)mo.tilt_deg, (double)mo.gx, (double)mo.gy, (double)mo.gz,
+                 (unsigned)mo.dropped, motion_log_enabled() ? "true" : "false", motion_get_range_g(),
+                 (unsigned long long)recorder_get_motion_rows(), (unsigned)recorder_get_motion_drops());
 
     accel_selftest_result_t st;
     accel_capture_self_test_get_result(&st);
@@ -668,54 +666,50 @@ static esp_err_t handler_error(httpd_req_t *req, const char *status, const char 
     return ESP_OK;
 }
 
-static esp_err_t handler_accel_config(httpd_req_t *req) {
-    char body[128];
-    if (!read_body(req, body, sizeof(body))) {
-        return handler_error(req, "400 Bad Request", "bad body");
-    }
-    if (recorder_is_recording()) {
-        return handler_error(req, "409 Conflict", "recording in progress");
-    }
-
-    int fs_g = (int)fs_enum_to_g(accel_capture_get_fs());
-    int filter = (int)accel_capture_get_filter_mode(); // 0 off, 1 low-pass, 2 high-pass
-    int cutoff = (int)accel_capture_get_hpcf();         // 0..7 (HPCF_XL)
-    json_extract_int(json_find_value(body, "fs_g"), &fs_g);
-    bool has_filter = json_extract_int(json_find_value(body, "filter"), &filter);
-    json_extract_int(json_find_value(body, "cutoff"), &cutoff);
-    // Backward compatibility with an older client that only sends the lpf2 bool.
-    bool lpf2 = false;
-    if (!has_filter && json_extract_bool(json_find_value(body, "lpf2"), &lpf2)) {
-        filter = lpf2 ? (int)IIS3DWB_FILTER_LOWPASS : (int)IIS3DWB_FILTER_OFF;
-    }
-    if (filter < 0 || filter > (int)IIS3DWB_FILTER_HIGHPASS) filter = (int)IIS3DWB_FILTER_OFF;
-    if (cutoff < 0 || cutoff > (int)IIS3DWB_HPCF_ODR_800) cutoff = (int)IIS3DWB_HPCF_ODR_4;
-
-    iis3dwb_fs_t fs;
-    switch (fs_g) {
-        case 4: fs = IIS3DWB_FS_4G; break;
-        case 8: fs = IIS3DWB_FS_8G; break;
-        case 16: fs = IIS3DWB_FS_16G; break;
-        default: fs = IIS3DWB_FS_2G; break;
-    }
-
-    if (!accel_capture_set_config(fs, (iis3dwb_filter_mode_t)filter, (iis3dwb_hpcf_t)cutoff)) {
-        return handler_error(req, "500 Internal Server Error", "sensor config write failed");
-    }
-    return handler_ok(req);
-}
-
-static esp_err_t handler_accel_remember(httpd_req_t *req) {
+// POST /api/motion/config {"range":2|4|8|16, "log":0|1} -- either key optional.
+static esp_err_t handler_motion_config(httpd_req_t *req) {
     char body[64];
     if (!read_body(req, body, sizeof(body))) {
         return handler_error(req, "400 Bad Request", "bad body");
     }
-    bool enabled = false;
-    if (!json_extract_bool(json_find_value(body, "enabled"), &enabled)) {
-        return handler_error(req, "400 Bad Request", "missing enabled");
+    int v = 0;
+    if (json_extract_int(json_find_value(body, "range"), &v) && !motion_set_range_g(v)) {
+        return handler_error(req, "400 Bad Request", "range must be 2, 4, 8 or 16 (or the sensor is missing)");
     }
-    accel_capture_set_remember_config(enabled);
+    if (json_extract_int(json_find_value(body, "log"), &v)) {
+        motion_set_log_enabled(v != 0);
+    }
     return handler_ok(req);
+}
+
+// GET /api/motion/history -- 1 Hz, oldest first: act (mg), spd (cm/s, -1
+// unknown), st (0 unknown, 1 still, 2 moving, 3 walking), cad (steps/min).
+static esp_err_t handler_motion_history(httpd_req_t *req) {
+    const int N = MOTION_HIST_SECONDS;
+    uint16_t *act = malloc(sizeof(uint16_t) * N);
+    int16_t *spd = malloc(sizeof(int16_t) * N);
+    uint8_t *st = malloc(N), *cad = malloc(N);
+    const size_t cap = (size_t)N * 24 + 64;
+    char *buf = malloc(cap);
+    if (!act || !spd || !st || !cad || !buf) {
+        free(act); free(spd); free(st); free(cad); free(buf);
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+    int n = motion_get_history(act, spd, st, cad, N);
+    size_t off = append(buf, cap, 0, "{\"act\":[");
+    for (int i = 0; i < n; i++) off = append(buf, cap, off, "%s%u", i ? "," : "", act[i]);
+    off = append(buf, cap, off, "],\"spd\":[");
+    for (int i = 0; i < n; i++) off = append(buf, cap, off, "%s%d", i ? "," : "", spd[i]);
+    off = append(buf, cap, off, "],\"st\":[");
+    for (int i = 0; i < n; i++) off = append(buf, cap, off, "%s%u", i ? "," : "", st[i]);
+    off = append(buf, cap, off, "],\"cad\":[");
+    for (int i = 0; i < n; i++) off = append(buf, cap, off, "%s%u", i ? "," : "", cad[i]);
+    off = append(buf, cap, off, "]}");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, off);
+    free(act); free(spd); free(st); free(cad); free(buf);
+    return ESP_OK;
 }
 
 static esp_err_t handler_mdns_friendly(httpd_req_t *req) {
@@ -2086,9 +2080,9 @@ static void register_handlers(httpd_handle_t server) {
         {.uri = "/api/log/config", .method = HTTP_POST, .handler = handler_log_config},
         {.uri = "/api/targets", .method = HTTP_GET, .handler = handler_targets_get},
         {.uri = "/api/targets", .method = HTTP_POST, .handler = handler_targets_set},
-        {.uri = "/api/accel/config", .method = HTTP_POST, .handler = handler_accel_config},
+        {.uri = "/api/motion/config", .method = HTTP_POST, .handler = handler_motion_config},
+        {.uri = "/api/motion/history", .method = HTTP_GET, .handler = handler_motion_history},
         {.uri = "/api/accel/selftest", .method = HTTP_POST, .handler = handler_accel_selftest},
-        {.uri = "/api/accel/remember", .method = HTTP_POST, .handler = handler_accel_remember},
         {.uri = "/api/record/start", .method = HTTP_POST, .handler = handler_record_start},
         {.uri = "/api/record/stop", .method = HTTP_POST, .handler = handler_record_stop},
         {.uri = "/api/record/mark", .method = HTTP_POST, .handler = handler_record_mark},

@@ -18,11 +18,10 @@ the web dashboard is HTML embedded into the binary.
 
 **Rework status:** done — rename/identity, BLE scanner (NimBLE) + live device
 list, SD scan log (every report as a CSV row), target rules, 100 % scan mode,
-web UI rebuilt around BLE (vibration graphs/FFT/spectrogram/CSV conversion
-removed). **Next:** accelerometer reduced to a ~100 Hz motion log +
-still/moving, steps, estimated speed, relative direction. Keep
-`udp_stream`/`ws_stream` (still raw accel, no UI) for a later middle-ground
-stream. Docs mark what's still inherited from VibraShock.
+motion profile (100 Hz feed → still/moving/walking, steps, speed, axis, tilt;
+optional `.motion.csv`), web UI rebuilt around BLE + motion. Kept on purpose:
+`udp_stream`/`ws_stream` (still raw 26.7 kHz accel, no UI) as a basis for a
+later lower-rate stream. Docs mark what's still inherited from VibraShock.
 
 - The ESP32-S3 is **BLE only** — no Classic Bluetooth. Wi-Fi and BLE share
   one radio (coexistence), so heavy Wi-Fi traffic cuts scan time.
@@ -62,6 +61,10 @@ stream. Docs mark what's still inherited from VibraShock.
 
 - Build: `pio run` · USB flash: `pio run -t upload` · Serial monitor: `pio run -t monitor`
 - **Always finish a code change by building** to confirm it compiles before reporting done.
+- No board needed for logic checks: MinGW gcc is at `/c/msys64/mingw64/bin` (put
+  it on PATH first) — e.g. `motion.c` was verified by compiling it against stub
+  headers with synthetic input (ARCHITECTURE.md §18). For the web UI, loading
+  `src/dashboard.html` in jsdom with the API mocked catches runtime errors.
 
 ## Hard rules — these silently break things if ignored
 
@@ -111,7 +114,9 @@ stream. Docs mark what's still inherited from VibraShock.
    `nvs` partition). `wifi_cfg`, `boot_cfg`, `pwr_cfg`, `accel_cfg` and
    `recorder` are read by both firmwares: never change the meaning or format
    of an existing key there. New BTScanner settings go into new keys or a new
-   namespace (`ble`, ...). The update-server settings use their own
+   namespace (`ble`, `bts_log`, `bts_targets`, `bts_motion`). The motion
+   range/filter is applied with `accel_capture_set_config_transient()` so
+   `accel_cfg` is never written. The update-server settings use their own
    `bts_ota_cloud` / `bts_dev_report` namespaces on purpose, so a converted
    board never talks to VibraShock's server. Keep BTScanner's SD files out of
    VibraShock's `/rec` directory.
@@ -166,12 +171,13 @@ stream. Docs mark what's still inherited from VibraShock.
 
 ## Source map (`src/`)
 
-`main.c` (boot/init order + OTA validate) · `ble_scanner.*` (NimBLE continuous
+`main.c` (boot/init order + OTA validate) · `motion.*` (100 Hz feed → motion
+state, steps, speed, axis, tilt, history; `.motion.csv` rows) · `ble_scanner.*` (NimBLE continuous
 extended scan → PSRAM report queue → processing task: AD decode, per-address
 device table with 2 min history + last payloads, report hook, targets) ·
 `scan_log.*` (CSV schema + FORMAT.md, ADV/TARGET/MARK/STATUS/INFO rows, target
-rules, logging settings, 100 % scan mode, serial mirror) · `accel_capture.*` (IIS3DWB FIFO+DMA,
-ring buffers) · `ring_buffer.*` · `recorder.*` (SD card, logging sessions, line buffer → SD writer, markers) · `ota.*` + `ota_token.h` (OTA install + token
+rules, logging settings, 100 % scan mode, serial mirror) · `accel_capture.*` (IIS3DWB FIFO+DMA;
+timestamped ~100 Hz motion feed + full-rate stream rings) · `ring_buffer.*` · `recorder.*` (SD card, logging sessions, line buffer → SD writer, markers) · `ota.*` + `ota_token.h` (OTA install + token
 gate) · `ota_cloud.*` (pull-from-URL update server + authed POST helper) ·
 `device_report.*` (periodic local-IP reporting to the update server) ·
 `wifi_manager.*` · `power_ctrl.*` (charger, fuel gauge, low-battery,

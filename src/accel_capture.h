@@ -81,25 +81,15 @@ bool accel_capture_read_temp_c(float *out_c);
 bool accel_capture_self_test_start(void);
 void accel_capture_self_test_get_result(accel_selftest_result_t *out);
 
-// The recording ring buffer (raw little-endian int16 X,Y,Z triplets, 6
-// bytes/sample) -- the SD writer task in recorder.c reads from this
-// directly via ring_buffer_read().
-ring_buffer_t *accel_capture_get_recording_ring(void);
+// ~100 Hz motion feed for motion.c: boxcar-averaged acceleration in g with
+// the esp_timer time of each sample. Single consumer (motion.c).
+typedef struct {
+    int64_t t_us;
+    float x, y, z;
+} accel_motion_sample_t;
 
-// A second, independent recording-rate ring in the exact same raw int16
-// X,Y,Z triplet format, boxcar-decimated to accel_capture_get_recording_decim_rate_hz()
-// -- lets recorder.c write a much smaller file when full 26.7kHz resolution
-// isn't needed. Fed unconditionally, same as every other ring here (see
-// accel_capture_get_ws_stream_ring()'s rationale); recorder.c always drains
-// both this and the full-rate ring, writing from whichever one the current
-// recording is actually using and discarding the other.
-ring_buffer_t *accel_capture_get_recording_decim_ring(void);
-
-// The exact (non-round) sample rate accel_capture_get_recording_decim_ring()
-// runs at -- an integer decimation of the fixed 26.7kHz raw rate, so it
-// doesn't land on a round number. Store this in the recording header
-// rather than a rounded label.
-float accel_capture_get_recording_decim_rate_hz(void);
+size_t accel_capture_read_motion(accel_motion_sample_t *out, size_t max_samples);
+float accel_capture_get_motion_rate_hz(void); // exact output rate (measured ODR / 267)
 
 // The full-rate (undecimated) streaming ring buffer -- same raw int16
 // X,Y,Z triplet format as the recording ring, but much smaller and fed
@@ -130,7 +120,6 @@ uint32_t accel_capture_get_sensor_overruns(void);
 uint32_t accel_capture_get_ring_drops(void);
 uint32_t accel_capture_get_stream_ring_drops(void);
 uint32_t accel_capture_get_ws_stream_ring_drops(void);
-uint32_t accel_capture_get_recording_decim_ring_drops(void);
 
 // Fills `out` with the per-axis (X,Y,Z) percentage of samples at/near full-scale
 // saturation (clipping) over the interval since the previous call. Best-effort

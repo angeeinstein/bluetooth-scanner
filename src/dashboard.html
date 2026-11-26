@@ -517,6 +517,15 @@
         <div class="row"><span class="k">Wi-Fi</span><span class="v" id="ds-wifi">–</span></div>
         <div class="row"><span class="k">Clock</span><span class="v" id="ds-clock">–</span></div>
       </div>
+      <div class="card">
+        <h2>Motion <span class="sub" style="margin-left:auto">this board</span></h2>
+        <div class="row"><span class="k">State</span><span class="v"><span id="mo-pill" class="pill pending">–</span></span></div>
+        <div class="row"><span class="k">Activity</span><span class="v" id="mo-act">–</span></div>
+        <div class="row"><span class="k">Steps · cadence</span><span class="v" id="mo-steps">–</span></div>
+        <div class="row"><span class="k">Speed · distance</span><span class="v" id="mo-speed">–</span></div>
+        <div class="row"><span class="k">Movement axis</span><span class="v" id="mo-axis">–</span></div>
+        <div class="row"><span class="k">Tilt</span><span class="v" id="mo-tilt">–</span></div>
+      </div>
       <div class="card tglist">
         <h2>Target devices <span class="sub" style="margin-left:auto" id="tg-count">–</span></h2>
         <div id="tg-body"><div class="sub">No target device seen in the last minute.</div></div>
@@ -562,6 +571,11 @@
         <h2>Signal <span class="sub" style="margin-left:auto">last 2 min, 1 s steps</span></h2>
         <div class="chartbox"><canvas id="an-rssi-chart"></canvas></div>
         <div class="chartlegend"><span><i style="background:var(--accent)"></i>mean RSSI (dBm)</span><span><i style="background:var(--panel3)"></i>packets / s</span></div>
+      </div>
+      <div class="card chartcard">
+        <h2>Motion of this board <span class="sub" style="margin-left:auto">last 10 min</span></h2>
+        <div class="chartbox"><canvas id="an-mo-chart"></canvas></div>
+        <div class="chartlegend"><span><i style="background:var(--yellow)"></i>activity (mg)</span><span><i style="background:var(--green)"></i>walking speed (m/s)</span><span id="an-mo-sum"></span></div>
       </div>
       <div class="card chartcard">
         <h2>Air activity <span class="sub" style="margin-left:auto">last 10 min</span></h2>
@@ -655,44 +669,26 @@
 
       <!-- CAPTURE -->
       <div class="card" data-sgroup="capture">
-        <h2>Sensor &amp; scale</h2>
+        <h2>Motion sensor</h2>
         <div class="config-row" style="margin-top:0">
           <label>Measurement range
-            <select id="fs-select" onchange="applyAccelConfig()">
+            <select id="mo-range" onchange="setMotionConfig('range', +this.value)">
               <option value="2">±2 g</option>
               <option value="4">±4 g</option>
               <option value="8">±8 g</option>
               <option value="16">±16 g</option>
             </select>
           </label>
-          <label><input type="checkbox" id="filter-on" onchange="applyAccelConfig()"> Second-stage filter (LPF2)</label>
         </div>
-        <div class="config-row" id="filter-detail" style="margin-top:8px; display:none">
-          <label>Type
-            <select id="filter-type" onchange="applyAccelConfig()">
-              <option value="1">Low-pass</option>
-              <option value="2">High-pass</option>
-            </select>
-          </label>
-          <label>Cutoff
-            <select id="filter-cutoff" onchange="applyAccelConfig()">
-              <option value="0">6.3 kHz</option>
-              <option value="1">2.7 kHz</option>
-              <option value="2">1.3 kHz</option>
-              <option value="3">590 Hz</option>
-              <option value="4">270 Hz</option>
-              <option value="5">133 Hz</option>
-              <option value="6">67 Hz</option>
-              <option value="7">33 Hz</option>
-            </select>
-          </label>
+        <div class="sub" style="margin:4px 0 8px">±4&nbsp;g (default) covers walking, running and handling; use ±8/16&nbsp;g only if hard knocks clip. The IIS3DWB samples at 26.7&nbsp;kHz; the board averages that down to ~100&nbsp;Hz. Its filter stays off — a high-pass would remove gravity, which tilt and step detection need.</div>
+        <div class="row">
+          <span class="k"><label for="mo-log">Log 100 Hz acceleration (<code>.motion.csv</code>)</label></span>
+          <span class="v"><input type="checkbox" id="mo-log" onchange="setMotionConfig('log', this.checked ? 1 : 0)"></span>
         </div>
-        <div class="sub" id="filter-hint" style="margin:2px 0 0; display:none"></div>
-        <div class="row" style="margin-top:10px">
-          <span class="k"><label for="accel-remember">Remember scale &amp; filter on reboot</label></span>
-          <span class="v"><input type="checkbox" id="accel-remember" onchange="accelSetRemember(this)"></span>
-        </div>
-        <div class="sub" style="margin:2px 0 0">The accelerometer still runs as in VibraShock; its data isn't logged yet — the motion profile replaces this in the next step. With <b>Remember</b> off (default), the device always boots at ±2 g.</div>
+        <div class="sub" style="margin:2px 0 8px">Each logging session then also gets <code>&lt;name&gt;.motion.csv</code> (time, x, y, z in g, ~3&nbsp;KB/s) on the same clock as the scan log, for your own analysis. The once-per-second MOTION rows in the scan log are written either way.</div>
+        <div class="row"><span class="k">Sample rate</span><span class="v" id="mo-rate">–</span></div>
+        <div class="row"><span class="k">Samples lost</span><span class="v" id="mo-drop">–</span></div>
+        <div class="sub" style="margin:6px 0 0">What the board can tell from acceleration alone (no gyroscope, no compass): still / moving / walking, steps and cadence, an estimated walking speed and distance, the main horizontal axis it moves along (relative to the board, 180° ambiguous, needs a few seconds to settle after the board is turned) and its tilt. No absolute heading and no position tracking.</div>
       </div>
 
       <div class="card" data-sgroup="capture">
@@ -928,7 +924,6 @@ var streamModeSynced = false;
 var tsIgnoreSynced = false;
 var browserTimeSynced = false;
 var decimRateLabelSet = false;
-var accelRememberSynced = false;
 var savedNetworks = [];
 
 function update(data) {
@@ -955,22 +950,8 @@ function update(data) {
   if (data.accel) {
     var odr = data.accel.measured_odr_hz;
     setText('about-odr', (odr && odr > 0) ? (odr / 1000).toFixed(3) + ' kHz (measured)' : 'measuring…');
-    if (!accelRememberSynced && typeof data.accel.remember_config === 'boolean') {
-      accelRememberSynced = true;
-      document.getElementById('accel-remember').checked = data.accel.remember_config;
-    }
-    if (!document.activeElement || document.activeElement.id !== 'fs-select') {
-      document.getElementById('fs-select').value = String(data.accel.fs_g);
-    }
-    var fmode = (typeof data.accel.filter === 'number') ? data.accel.filter : (data.accel.lpf2 ? 1 : 0);
-    var actId = document.activeElement ? document.activeElement.id : '';
-    if (actId !== 'filter-on') document.getElementById('filter-on').checked = (fmode !== 0);
-    if (fmode !== 0 && actId !== 'filter-type') document.getElementById('filter-type').value = String(fmode);
-    if (actId !== 'filter-cutoff' && typeof data.accel.cutoff === 'number') {
-      document.getElementById('filter-cutoff').value = String(data.accel.cutoff);
-    }
-    updateFilterUi();
   }
+  if (data.motion) updateMotion(data.motion);
 
   if (data.recording) {
     var R = data.recording;
@@ -1785,32 +1766,25 @@ function postJson(path, obj, cb) {
   }).catch(function() { if (cb) cb(false); });
 }
 
-// Shows/hides the Type + Cutoff dropdowns with the toggle, and sets a short
-// hint (esp. that high-pass drops the DC/gravity offset). Reads the controls'
-// current values only -- no network.
-function updateFilterUi() {
-  var on = document.getElementById('filter-on').checked;
-  var type = parseInt(document.getElementById('filter-type').value, 10); // 1 LP, 2 HP
-  document.getElementById('filter-detail').style.display = on ? '' : 'none';
-  var hint = document.getElementById('filter-hint');
-  if (!on) { hint.style.display = 'none'; return; }
-  hint.style.display = '';
-  hint.textContent = (type === 2)
-    ? 'High-pass removes the DC / 1 g gravity offset — passes only vibration above the cutoff.'
-    : 'Low-pass keeps content below the cutoff. (Off = wideband LPF1, ~6.3 kHz linear phase.)';
+var MO_PILL = {still: 'pending', moving: 'warn', walking: 'ok', unknown: 'pending'};
+function updateMotion(m) {
+  var pill = document.getElementById('mo-pill');
+  if (pill) { pill.className = 'pill ' + (m.ok ? (MO_PILL[m.state] || 'pending') : 'bad'); pill.textContent = m.ok ? m.state : 'no sensor'; }
+  setText('mo-act', m.ok ? (m.act * 1000).toFixed(0) + ' mg' + (m.peak ? ' · peak ' + (m.peak * 1000).toFixed(0) + ' mg' : '') : '–');
+  setText('mo-steps', m.steps + (m.cad > 0 ? ' · ' + m.cad.toFixed(0) + ' /min' : ''));
+  setText('mo-speed', (m.speed >= 0 ? m.speed.toFixed(2) + ' m/s' : (m.state === 'moving' ? 'not walking' : '–')) + ' · ' + m.dist.toFixed(0) + ' m');
+  setText('mo-axis', m.axis >= 0 ? m.axis.toFixed(0) + '° ±180 · ' + Math.round(m.conf * 100) + ' % clear' : '–');
+  setText('mo-tilt', m.ok ? m.tilt.toFixed(0) + '°' : '–');
+  setText('mo-rate', m.rate_hz ? m.rate_hz.toFixed(2) + ' Hz' : '–');
+  setText('mo-drop', String(m.dropped) + (m.mdrops ? ' · ' + m.mdrops + ' file rows' : ''));
+  var r = document.getElementById('mo-range');
+  if (r && document.activeElement !== r) r.value = String(m.range);
+  var l = document.getElementById('mo-log');
+  if (l && document.activeElement !== l) l.checked = !!m.log;
 }
-function applyAccelConfig() {
-  var fs = parseInt(document.getElementById('fs-select').value, 10);
-  var on = document.getElementById('filter-on').checked;
-  var type = parseInt(document.getElementById('filter-type').value, 10); // 1 LP, 2 HP
-  var cutoff = parseInt(document.getElementById('filter-cutoff').value, 10);
-  updateFilterUi();
-  postJson('/api/accel/config', {fs_g: fs, filter: on ? type : 0, cutoff: cutoff});
-}
-
-function accelSetRemember(chk) {
-  chk.disabled = true;
-  postJson('/api/accel/remember', {enabled: chk.checked}, function() { chk.disabled = false; });
+function setMotionConfig(key, v) {
+  var o = {}; o[key] = v;
+  postJson('/api/motion/config', o, function (ok) { if (!ok) toast('Could not change the motion setting'); });
 }
 
 function accelSelfTest(btn) {
@@ -2257,7 +2231,20 @@ function drawLines(id, series, xLabelSec) {
   });
 }
 
-var actHist = null;
+var actHist = null, moHist = null;
+function drawMotion() {
+  if (!moHist) return;
+  var act = moHist.act, spd = moHist.spd.map(function (v) { return v < 0 ? null : v / 100; });
+  var amax = 0; act.forEach(function (v) { if (v > amax) amax = v; });
+  drawLines('an-mo-chart', [
+    {data: act, color: cssVar('--yellow'), min: 0, max: niceMax(Math.max(amax, 50))},
+    {data: spd, color: cssVar('--green'), min: 0, max: 2.5}
+  ], 600);
+  var n = moHist.st.length, cnt = [0, 0, 0, 0];
+  moHist.st.forEach(function (v) { cnt[v] = (cnt[v] || 0) + 1; });
+  setText('an-mo-sum', n ? ('still ' + Math.round(cnt[1] * 100 / n) + ' % · moving ' + Math.round(cnt[2] * 100 / n) +
+    ' % · walking ' + Math.round(cnt[3] * 100 / n) + ' %') : '');
+}
 function drawActivity() {
   if (!actHist) return;
   var series = [{data: actHist.rps, color: cssVar('--accent')}, {data: actHist.dev, color: cssVar('--green')}];
@@ -2268,9 +2255,12 @@ function pollHistory() {
   var d = document.getElementById('tab-dashboard'), a = document.getElementById('tab-analyze');
   if (document.hidden || otaBusy || !((d && d.classList.contains('active')) || (a && a.classList.contains('active')))) return;
   fetch('/api/ble/history').then(function (r) { return r.json(); }).then(function (j) { actHist = j; drawActivity(); }).catch(function () {});
+  if (a && a.classList.contains('active')) {
+    fetch('/api/motion/history').then(function (r) { return r.json(); }).then(function (j) { moHist = j; drawMotion(); }).catch(function () {});
+  }
 }
 setInterval(pollHistory, 5000);
-window.addEventListener('resize', function () { drawActivity(); anDraw(); });
+window.addEventListener('resize', function () { drawActivity(); drawMotion(); anDraw(); });
 
 // Target list on the Dashboard + the short rule summary.
 function renderTargets() {
@@ -2401,7 +2391,7 @@ function goTab(name) {
   }
   if (name === 'dashboard' || name === 'analyze') {
     pollBle(); pollHistory();
-    requestAnimationFrame(function () { drawActivity(); anDraw(); });
+    requestAnimationFrame(function () { drawActivity(); drawMotion(); anDraw(); });
   }
   if (name === 'analyze') { anFill(); pollDevice(); }
   if (name === 'recordings') refreshRecordings();

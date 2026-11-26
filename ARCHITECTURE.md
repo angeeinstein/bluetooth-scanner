@@ -33,6 +33,7 @@ at the level of detail needed to write about it or to onboard a new developer.
 15. [Cross‑cutting design principles](#15-cross-cutting-design-principles)
 16. [BLE scanner](#16-ble-scanner)
 17. [Scan log and sessions](#17-scan-log-and-sessions)
+18. [Motion profile](#18-motion-profile)
 
 ---
 
@@ -747,5 +748,55 @@ flowchart LR
   resulting disconnects); session end turns it back on immediately.
 - **Settings** live in `bts_log` (autostart, wifi_off, serial) and rules in
   `bts_targets` — new namespaces, so VibraShock's keys are never touched.
-- **Accelerometer.** Its recording rings shrank to 128 KB / 32 KB; the SD
-  writer just drains them until the motion pipeline replaces them.
+- **Two channels.** The recorder writes two line streams per session through
+  the same code path: CH_SCAN (`<base>.csv`, 1 MB ring) and CH_MOTION
+  (`<base>.motion.csv`, 128 KB ring, only if enabled). Each has its own parts,
+  rotation, counters and accept gate; a failed motion open never stops the
+  scan log, a failed write on either ends the session.
+
+## 18. Motion profile
+
+```mermaid
+flowchart LR
+  D[accel_drain<br/>26.7 kHz] -->|boxcar 267, timestamped| Q[(motion ring<br/>~10 s)]
+  Q --> M[motion task<br/>core 1, prio 7]
+  M -->|100 Hz rows| R[recorder CH_MOTION]
+  M -->|1 Hz MOTION row| S[scan_log]
+  M --> H[(1 Hz state + 600 s history)]
+```
+
+- **Feed.** `accel_capture.c` averages 267 raw samples (26.667 kHz → ~99.9 Hz)
+  in g and timestamps each with the esp_timer time of its window centre. The
+  sample time comes from the FIFO backlog at read time: the newest entry is
+  "now", entry *i* is `(backlog − 1 − i)` periods older (period from the
+  measured ODR). The old raw-recording rings are gone; the UDP/WS full-rate
+  rings remain.
+- **Sensor setup.** `motion_start()` applies BTScanner's own range (NVS
+  `bts_motion`, default ±4 g) and forces the second-stage filter off via
+  `accel_capture_set_config_transient()` — so nothing is written to
+  VibraShock's `accel_cfg`, and a remembered VibraShock high-pass (which would
+  remove gravity) can't break tilt or steps.
+- **Per sample.** Gravity = 1 s low-pass of the vector; dynamic acceleration =
+  sample − gravity. Its vertical part (projection on the gravity direction),
+  smoothed over 5 samples, drives step detection. Its horizontal part, in a
+  basis of the board's X axis projected onto the horizontal plane (Y if X is
+  near vertical), feeds a 3 s covariance whose principal axis is the movement
+  axis (0–180°, confidence = eigenvalue contrast).
+- **Steps.** A peak counts when it exceeds max(0.08 g, 0.35 × recent
+  amplitude), the signal then drops 0.05 g below it, the signal dipped below
+  0 g since the last step, and ≥ 0.28 s passed. Steps count only once 3
+  arrive with intervals of 0.28–2 s (the held ones are then counted too), so
+  isolated bumps don't. Step length = 0.47 · (peak-to-valley in m/s²)^¼
+  (Weinberg), clamped to 0.3–1.4 m.
+- **Per second.** Activity = RMS of the dynamic acceleration. State: walking
+  if ≥ 2 counted steps in 10 s and one in the last 2 s; still after 2 s below
+  0.02 g; moving above 0.04 g (or right after walking); in between the state
+  holds. Cadence from the step times; speed = mean step length × cadence
+  (walking only; 0 still; unknown otherwise).
+- **Verified offline** with the real `motion.c` against synthetic data (host
+  gcc + stubs): still, 110 and 90 steps/min walks (step counts exact, cadence
+  ±0.5), irregular handling (no false steps), and a 60° tilted / 30° turned
+  board (axis matched the hand-calculated 164°; it needs ~10 s to settle after
+  a large orientation change).
+- **Limits.** No gyroscope or magnetometer: no absolute heading, the axis has
+  a 180° ambiguity, and position isn't integrated (it drifts within seconds).

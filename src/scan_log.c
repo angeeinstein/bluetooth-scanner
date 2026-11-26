@@ -36,6 +36,8 @@ static const char s_csv_header[] =
     "kind,uptime_ms,utc,addr,addr_kind,rssi,event,props,phy,sid,tx_power,data_status,name,"
     "name_src,company_id,mfg_data,ad_tx_power,flags,appearance,uuids,svc_data,data,target,info\n";
 
+static const char s_motion_header[] = "uptime_ms,ax_g,ay_g,az_g\n";
+
 static const char s_format_doc[] =
     "# BTScanner scan logs\n"
     "\n"
@@ -50,6 +52,9 @@ static const char s_format_doc[] =
     "  data up to the last ~5 s sync is valid.\n"
     "- `<base>.mark`: current marker list, CSV `id,time_s,uptime_ms,unix_time_s,note` (the markers are\n"
     "  also rows in the log itself).\n"
+    "- `<base>.motion.csv` (if enabled): the board's own acceleration at ~100 Hz,\n"
+    "  `uptime_ms,ax_g,ay_g,az_g` -- boxcar average of the 26.7 kHz sensor, gravity included, device\n"
+    "  frame. Same uptime clock as the log, so it lines up with every BLE row. Rotates like the log.\n"
     "\n"
     "## CSV columns\n"
     "One row per received BLE report (`kind=ADV`) plus event rows. Empty = not present / not applicable.\n"
@@ -57,7 +62,7 @@ static const char s_format_doc[] =
     "\n"
     "| column | meaning |\n"
     "|---|---|\n"
-    "| kind | ADV, TARGET, MARK, STATUS, INFO, START, STOP |\n"
+    "| kind | ADV, TARGET, MARK, MOTION, STATUS, INFO, START, STOP |\n"
     "| uptime_ms | ms since boot (always present; monotonic, use it to order and time rows) |\n"
     "| utc | ISO 8601 UTC with ms, if the clock was set (NTP or browser); see INFO clock_set |\n"
     "| addr | advertiser address AA:BB:CC:DD:EE:FF (MSB first) |\n"
@@ -92,6 +97,13 @@ static const char s_format_doc[] =
     "  after the device was unseen for 30 s. addr, rssi, name are filled.\n"
     "- MARK: marker add / note / delete (`id=`, `action=`, `elapsed_s=`, `note=`), from the POWER\n"
     "  button or the dashboard.\n"
+    "- MOTION: once per second, the board's own movement (accelerometer only, best effort): state\n"
+    "  (still / moving / walking / unknown), activity_g (RMS of dynamic acceleration), peak_g, steps\n"
+    "  (since boot), cadence_spm, step_m (estimated step length), speed_mps (walking speed; 0 still;\n"
+    "  empty = moving but unknown), dist_m (walked since boot), axis_deg (main horizontal movement\n"
+    "  axis, 0-180 from the device X axis projected horizontally; 180 deg ambiguous; empty = none),\n"
+    "  axis_conf (0-1), tilt_deg (device +Z vs up), g (gravity direction x/y/z). No gyroscope or\n"
+    "  compass: there is no absolute heading, and positions are not tracked.\n"
     "- STATUS: once per second: rps (reports/s), devices (in table), recent (seen in 60 s), drops\n"
     "  (reports lost before processing), log_drops (rows lost before the card), wifi, battery, temperatures.\n"
     "- INFO: clock_set / clock_adjusted (the clock was set or jumped; rows before it have no or old utc),\n"
@@ -101,6 +113,10 @@ static const char s_format_doc[] =
 
 const char *scan_log_csv_header(void) {
     return s_csv_header;
+}
+
+const char *scan_log_motion_csv_header(void) {
+    return s_motion_header;
 }
 
 const char *scan_log_format_doc(void) {
@@ -503,10 +519,12 @@ void scan_log_session_begin(const char *base) {
     xSemaphoreGive(s_rules_mux);
     char info[900];
     snprintf(info, sizeof(info),
-             "base=%s dev=%s fw=%s scan=%s phy=%s duplicates=all wifi_mode=%s rules=%s", base, devid,
+             "base=%s dev=%s fw=%s scan=%s phy=%s duplicates=all wifi_mode=%s motion_file=%s accel_range_g=%d "
+             "rules=%s", base, devid,
              FIRMWARE_VERSION, ble_scanner_get_active() ? "active" : "passive",
              ble_scanner_get_coded() ? "1M+CODED" : "1M",
-             s_set.wifi_off ? "off_while_logging" : "on", rules[0] ? rules : "-");
+             s_set.wifi_off ? "off_while_logging" : "on", motion_log_enabled() ? "on" : "off",
+             motion_get_range_g(), rules[0] ? rules : "-");
     emit_event("START", s_session_start_us, NULL, NULL, 127, NULL, info);
 }
 
@@ -529,6 +547,20 @@ void scan_log_marker_event(const recorder_marker_t *m, const char *action) {
     emit_event("MARK", m->at_us, NULL, NULL, 127, NULL, info);
 }
 
+void scan_log_motion_row(const motion_status_t *m, int64_t t_us) {
+    char info[400];
+    size_t o = (size_t)snprintf(info, sizeof(info), "state=%s activity_g=%.3f peak_g=%.3f steps=%u cadence_spm=%.0f",
+                                motion_state_name(m->state), (double)m->activity_g, (double)m->peak_g,
+                                (unsigned)m->steps, (double)m->cadence_spm);
+    o = appendf(info, sizeof(info), o, " step_m=%.2f speed_mps=", (double)m->step_m);
+    if (m->speed_mps >= 0) o = appendf(info, sizeof(info), o, "%.2f", (double)m->speed_mps);
+    o = appendf(info, sizeof(info), o, " dist_m=%.1f axis_deg=", (double)m->dist_m);
+    if (m->axis_deg >= 0) o = appendf(info, sizeof(info), o, "%.0f", (double)m->axis_deg);
+    o = appendf(info, sizeof(info), o, " axis_conf=%.2f tilt_deg=%.0f g=%.2f/%.2f/%.2f", (double)m->axis_conf,
+                (double)m->tilt_deg, (double)m->gx, (double)m->gy, (double)m->gz);
+    emit_event("MOTION", t_us, NULL, NULL, 127, NULL, info);
+}
+
 // --- 1 Hz task: STATUS rows, clock watch, Wi-Fi switching -------------------------------------
 
 static void status_row(void) {
@@ -540,16 +572,18 @@ static void status_row(void) {
     wifi_manager_get_status(&w);
     const char *wifi = !wifi_manager_get_radio_enabled() ? "off"
                        : (w.sta_state == WIFI_STA_CONNECTED) ? "sta" : "ap";
-    char info[320];
+    char info[384];
     snprintf(info, sizeof(info),
              "rps=%u devices=%u recent=%u total=%llu drops=%u log_drops=%u restarts=%u scanning=%d wifi=%s "
-             "batt_pct=%.0f vbat_mv=%d usb=%d mcu_c=%.1f chg_c=%.1f free_heap=%u free_psram=%u",
+             "batt_pct=%.0f vbat_mv=%d usb=%d mcu_c=%.1f chg_c=%.1f free_heap=%u free_psram=%u "
+             "motion_rows=%llu motion_drops=%u",
              (unsigned)b.reports_per_s, (unsigned)b.devices_known, (unsigned)b.devices_recent,
              (unsigned long long)b.reports_total, (unsigned)b.queue_drops, (unsigned)recorder_get_log_drops(),
              (unsigned)b.restarts, b.scanning ? 1 : 0, wifi, (double)pw.batt_percent, pw.vbat_mv,
              pw.on_battery ? 0 : 1, (double)pw.mcu_temp_c, (double)pw.tdie_c,
              (unsigned)esp_get_free_internal_heap_size(),
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned long long)recorder_get_motion_rows(), (unsigned)recorder_get_motion_drops());
     emit_event("STATUS", esp_timer_get_time(), NULL, NULL, 127, NULL, info);
 }
 

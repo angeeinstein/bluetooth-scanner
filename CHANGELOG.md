@@ -48,6 +48,13 @@ before that are in the
   response in hex, and its RSSI and packet rate over the last 2 minutes
   (kept on the board). **Air activity** chart (reports/s and devices per
   second, last 10 minutes) on the Dashboard and in Analyze.
+- **Motion profile of the board** from the accelerometer: still / moving /
+  walking, activity, steps and cadence, estimated walking speed and distance,
+  the main horizontal movement axis (relative to the board) and tilt. A
+  Motion card on the Dashboard, a 10-minute motion chart in Analyze, a MOTION
+  row in the log every second, and optionally every ~100 Hz sample in
+  `<base>.motion.csv`. Settings → Motion sensor: range (default ±4 g) and the
+  100 Hz file; the sensor's filter stays off so gravity is kept.
 - **Recordings tab** lists the logging sessions with duration, rows, size and
   how they ended; download each part, rename or delete.
 
