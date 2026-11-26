@@ -1262,14 +1262,16 @@ typedef struct {
 } dir_file_t;
 
 // If `name` belongs to session `base`, returns the suffix after the base
-// (".csv", "_part2.csv", ".log", ".mark"), else NULL.
+// (".csv", ".motion.csv", "_part2.csv", "_part2.motion.csv", ".log", ".mark"),
+// else NULL.
 static const char *session_suffix(const char *name, const char *base) {
     size_t bl = strlen(base);
     if (strncmp(name, base, bl) != 0) {
         return NULL;
     }
     const char *suf = name + bl;
-    if (strcmp(suf, ".csv") == 0 || strcmp(suf, ".log") == 0 || strcmp(suf, ".mark") == 0) {
+    if (strcmp(suf, ".csv") == 0 || strcmp(suf, ".motion.csv") == 0 || strcmp(suf, ".log") == 0 ||
+        strcmp(suf, ".mark") == 0) {
         return suf;
     }
     if (strncmp(suf, "_part", 5) == 0) {
@@ -1278,18 +1280,22 @@ static const char *session_suffix(const char *name, const char *base) {
             return NULL;
         }
         while (isdigit((unsigned char)*c)) c++;
-        if (strcmp(c, ".csv") == 0) {
+        if (strcmp(c, ".csv") == 0 || strcmp(c, ".motion.csv") == 0) {
             return suf;
         }
     }
     return NULL;
 }
 
-// The session base of a .csv file name ("x_part3.csv" -> "x"), or false if it
-// isn't a session CSV.
+// The session base of a scan-log .csv file name ("x_part3.csv" -> "x"), or
+// false if it isn't one. A session's motion file ("x.motion.csv") is not a
+// scan log -- it belongs to session "x", it doesn't start one of its own.
 static bool csv_base(const char *name, char *out, size_t out_len) {
     size_t n = strlen(name);
     if (n < 5 || strcmp(name + n - 4, ".csv") != 0) {
+        return false;
+    }
+    if (n >= 11 && strcmp(name + n - 11, ".motion.csv") == 0) {
         return false;
     }
     snprintf(out, out_len, "%.*s", (int)(n - 4), name);
@@ -1344,6 +1350,8 @@ typedef struct {
     char end[12]; // stop / full / error / "" (still open or power loss)
     double dur_s;
     unsigned long long rows;
+    unsigned long long motion_rows;
+    unsigned log_drops, motion_drops;
 } session_log_t;
 
 static void parse_session_log(const char *base, session_log_t *out) {
@@ -1368,6 +1376,12 @@ static void parse_session_log(const char *base, session_log_t *out) {
         if (r) out->rows = strtoull(r + 6, NULL, 10);
         const char *du = strstr(line, " dur_s=");
         if (du) out->dur_s = strtod(du + 7, NULL);
+        const char *ld = strstr(line, " log_drops=");
+        if (ld) out->log_drops = (unsigned)strtoul(ld + 11, NULL, 10);
+        const char *mr = strstr(line, " motion_rows=");
+        if (mr) out->motion_rows = strtoull(mr + 13, NULL, 10);
+        const char *md = strstr(line, " motion_drops=");
+        if (md) out->motion_drops = (unsigned)strtoul(md + 14, NULL, 10);
         if (strcmp(ev, "start") == 0 || strcmp(ev, "rotate") == 0) {
             out->end[0] = '\0';
         } else {
@@ -1407,7 +1421,7 @@ static esp_err_t handler_recordings_list(httpd_req_t *req) {
         uint64_t bytes = 0;
         int parts = 0;
         bool has_log = false, has_mark = false;
-        char flist[1024];
+        char flist[2048];
         size_t fo = 0;
         for (int j = 0; j < nf; j++) {
             const char *suf = session_suffix(files[j].name, base);
@@ -1416,11 +1430,12 @@ static esp_err_t handler_recordings_list(httpd_req_t *req) {
             if (strcmp(suf, ".log") == 0) has_log = true;
             else if (strcmp(suf, ".mark") == 0) has_mark = true;
             else {
-                parts++;
+                bool motion = strstr(suf, ".motion.csv") != NULL;
+                parts += !motion;
                 char ne[200];
                 json_escape(ne, sizeof(ne), files[j].name);
-                fo = append(flist, sizeof(flist), fo, "%s{\"name\":\"%s\",\"bytes\":%u}", fo ? "," : "", ne,
-                            (unsigned)files[j].size);
+                fo = append(flist, sizeof(flist), fo, "%s{\"name\":\"%s\",\"bytes\":%u,\"motion\":%s}",
+                            fo ? "," : "", ne, (unsigned)files[j].size, motion ? "true" : "false");
             }
         }
         session_log_t lg;
@@ -1428,13 +1443,15 @@ static esp_err_t handler_recordings_list(httpd_req_t *req) {
         bool active = strcmp(base, active_base) == 0;
         char base_esc[200];
         json_escape(base_esc, sizeof(base_esc), base);
-        char item[1500];
+        char item[2600];
         int n = snprintf(item, sizeof(item),
                          "%s{\"id\":\"%s\",\"bytes\":%llu,\"parts\":%d,\"files\":[%s],\"log\":%s,\"mark\":%s,"
-                         "\"start\":\"%s\",\"dur_s\":%.1f,\"rows\":%llu,\"end\":\"%s\",\"active\":%s}",
+                         "\"start\":\"%s\",\"dur_s\":%.1f,\"rows\":%llu,\"end\":\"%s\",\"active\":%s,"
+                         "\"log_drops\":%u,\"motion_rows\":%llu,\"motion_drops\":%u}",
                          first ? "" : ",", base_esc, (unsigned long long)bytes, parts, fo ? flist : "",
                          has_log ? "true" : "false", has_mark ? "true" : "false", lg.start_utc, lg.dur_s,
-                         lg.rows, lg.end, active ? "true" : "false");
+                         lg.rows, lg.end, active ? "true" : "false", lg.log_drops, lg.motion_rows,
+                         lg.motion_drops);
         if (n > 0) {
             httpd_resp_send_chunk(req, item, strlen(item));
             first = false;
@@ -1835,7 +1852,7 @@ static esp_err_t handler_record_markers(httpd_req_t *req) {
         return ESP_OK;
     }
     int n = recorder_marker_list(marks, 64);
-    size_t cap = 64 * 128 + 16;
+    size_t cap = 64 * 160 + 16;
     char *buf = malloc(cap);
     if (buf == NULL) {
         free(marks);
@@ -1846,9 +1863,10 @@ static esp_err_t handler_record_markers(httpd_req_t *req) {
     for (int i = 0; i < n; i++) {
         char note_esc[96];
         json_escape(note_esc, sizeof(note_esc), marks[i].note);
-        off = append(buf, cap, off, "%s{\"id\":%u,\"t_s\":%.1f,\"unix\":%lld,\"note\":\"%s\"}",
-                     i ? "," : "", (unsigned)marks[i].id, marks[i].elapsed_s,
-                     (long long)marks[i].wall_unix_s, note_esc);
+        off = append(buf, cap, off,
+                     "%s{\"id\":%u,\"t_s\":%.1f,\"unix\":%lld,\"ago_ms\":%lld,\"note\":\"%s\"}",
+                     i ? "," : "", (unsigned)marks[i].id, marks[i].elapsed_s, (long long)marks[i].wall_unix_s,
+                     (long long)((esp_timer_get_time() - marks[i].at_us) / 1000), note_esc);
     }
     off = append(buf, cap, off, "]");
     httpd_resp_set_type(req, "application/json");

@@ -163,8 +163,11 @@ in between; the log records `wifi_off` / `wifi_on` INFO rows.
 7. **Analyze** — one device in detail: decoded fields, the last advertisement and scan response as
    hex, its mean RSSI and packets per second over the last 2 minutes (kept on the board, so it's
    there even if the page was closed), and the air-activity chart.
-8. **Recordings** — every logging session with its duration, rows, size and how it ended; download
-   the CSV part(s), `.log` and `.mark`, rename or delete. Files are in `/ble` on the card.
+8. **Recordings** — every logging session with its duration, rows, size, a health badge (clean /
+   logging / ended abruptly / card full / rows dropped) and a ⋯ menu; click one for its details,
+   markers (time, note, UTC), all files to download (scan log, motion, `.mark`, `.log`) and the
+   `.log` events. Files are in `/ble` on the card. Markers of the running session also show up as
+   numbered lines on the Dashboard and Analyze charts.
 9. **Settings → Scanning**: *Active scanning* (default on) asks every scannable device for its scan
    response; off = passive, the scanner never transmits and is invisible to the devices around it.
    *Coded PHY* adds BLE 5 long range, at the cost of fewer packets from ordinary devices.

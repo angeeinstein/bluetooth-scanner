@@ -113,3 +113,8 @@ CONFIG_BT_NIMBLE_TRANSPORT_EVT_DISCARD_COUNT=64
 # ESP_ERR_HTTPD_TASK. Let Wi-Fi and LWIP put their buffers (incl. the 16
 # static TX buffers, ~25 KB) in PSRAM first, internal only as a fallback.
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# That option also raises the static RX buffer count and BA window (16/16),
+# but static RX buffers must stay in internal (DMA) RAM: keep VibraShock's
+# 10 / 6, which saves ~10 KB of internal RAM.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_RX_BA_WIN=6

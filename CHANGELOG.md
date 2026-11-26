@@ -15,11 +15,16 @@ before that are in the
 ## [Unreleased]
 
 ### Fixed
+- **Recordings listed each session's motion file as a second session** named
+  `….motion` that showed "ended abruptly" while it kept growing. The motion
+  file now belongs to its session.
+- Session links and buttons on the Recordings tab were stacked as full-width
+  bars (a leftover VibraShock style).
 - **Boot loop on real hardware** ("task create failed", then the web server
   couldn't start and the board rebooted). Wi-Fi + Bluetooth left too little
   internal RAM for task stacks. Wi-Fi/network buffers and the BLE, scan-log
-  and motion task stacks now use PSRAM; the boot log reports free internal
-  RAM at each stage.
+  and motion task stacks now use PSRAM; Wi-Fi's static receive buffers stay
+  at VibraShock's 10; the boot log reports free internal RAM at each stage.
 
 ### Added
 - **BLE scanner.** Scans continuously for Bluetooth Low Energy devices
@@ -62,8 +67,13 @@ before that are in the
   row in the log every second, and optionally every ~100 Hz sample in
   `<base>.motion.csv`. Settings → Motion sensor: range (default ±4 g) and the
   100 Hz file; the sensor's filter stays off so gravity is kept.
-- **Recordings tab** lists the logging sessions with duration, rows, size and
-  how they ended; download each part, rename or delete.
+- **Recordings tab** in VibraShock's style: one row per session with its
+  name or date, duration, rows, size, motion/marker flags and a health badge
+  (clean, logging, ended abruptly, card full, rows dropped), a ⋯ menu, and a
+  detail sheet with session facts, the markers (time, note, UTC), every file
+  to download and the `.log` events.
+- **Markers on the charts:** the current session's markers are drawn as
+  numbered lines on the air-activity and motion charts.
 
 ### Removed
 - Accelerometer recording (`.bin` files), the on-device and in-browser CSV
