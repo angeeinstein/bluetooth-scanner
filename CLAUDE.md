@@ -106,7 +106,17 @@ still does vibration-recorder things, and docs say so where they're inherited.
    [partitions_ota.csv](partitions_ota.csv) must keep `nvs` at the same offset,
    or devices lose all saved settings (Wi-Fi, toggles) on update.
 
-7. **Changed anything a recording writes? Update the on-card format doc.** The
+7. **NVS is shared with VibraShock — keep switching between them safe.** A
+   board can be USB-flashed back and forth (a USB upload never touches the
+   `nvs` partition). `wifi_cfg`, `boot_cfg`, `pwr_cfg`, `accel_cfg` and
+   `recorder` are read by both firmwares: never change the meaning or format
+   of an existing key there. New BTScanner settings go into new keys or a new
+   namespace (`ble`, ...). The update-server settings use their own
+   `bts_ota_cloud` / `bts_dev_report` namespaces on purpose, so a converted
+   board never talks to VibraShock's server. Keep BTScanner's SD files out of
+   VibraShock's `/rec` directory.
+
+8. **Changed anything a recording writes? Update the on-card format doc.** The
    firmware writes `s_format_doc` (in [src/recorder.c](src/recorder.c)) to
    `/rec/FORMAT.md` on every SD card, and scripts/AI agents reading a card rely on
    it. Any change to the `.bin` header or layout ([src/recording_format.h](src/recording_format.h)),

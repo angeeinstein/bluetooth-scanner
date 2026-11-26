@@ -17,7 +17,9 @@
 #include "version.h"
 #include "ws_stream.h"
 
-#define NVS_NS "ota_cloud"
+// Own namespace, not VibraShock's "ota_cloud": a board switched over from
+// VibraShock must not pick up (and report to / pull from) its update server.
+#define NVS_NS "bts_ota_cloud"
 #define DL_CHUNK 4096
 
 // Transient-failure retries. A firmware download can fail at the connect (a

@@ -20,7 +20,8 @@
 #define REPORT_RETRY_MIN_MS 15000                 // first backoff after a failed POST
 #define REPORT_RETRY_MAX_MS 120000                // backoff ceiling (doubles up to here)
 
-#define NVS_NS "dev_report"
+// Own namespace, not VibraShock's "dev_report" (see ota_cloud.c).
+#define NVS_NS "bts_dev_report"
 
 // Cached copy of the on/off setting (loaded from NVS at start, updated on set),
 // so the poll task never has to touch NVS. Default on.

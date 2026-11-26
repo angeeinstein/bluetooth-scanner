@@ -37,6 +37,12 @@ before that are in the
 - **New OTA update token.** VibraShock and BTScanner images are now rejected by
   each other's OTA update, so neither firmware can be installed over the other
   by mistake. A USB flash still works either way.
+- **Update-server settings are separate from VibraShock's.** The server
+  address, its secret and the IP-reporting switch are stored under new names,
+  so a board converted from VibraShock starts with no server configured and
+  doesn't report to VibraShock's server. VibraShock's saved values stay
+  untouched for when the board is flashed back. Saved Wi-Fi networks, battery
+  learning and the other settings carry over in both directions.
 - `managed_components/` is no longer committed; the build downloads it, pinned
   by `dependencies.lock`. The committed copy broke the build on Windows clones
   because git rewrote its line endings.
