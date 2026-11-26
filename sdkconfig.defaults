@@ -83,3 +83,26 @@ CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 # app_main). If a bad update panics/resets before that, the bootloader reverts
 # to the previous slot -- so a broken OTA can't brick a device. ---
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# --- Bluetooth LE scanner (NimBLE host, observer role only) -------------------
+# BTScanner only listens, but the GAP roles and the security manager stay at
+# their defaults: IDF 5.2.1's NimBLE doesn't compile with peripheral/broadcaster
+# or security disabled (ble_gap.c / ble_hs.h errors). Extended advertising
+# enables the BLE 5 extended-scan API (legacy PDUs still arrive through it,
+# flagged as legacy). NimBLE's heap lives in PSRAM.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+CONFIG_BT_NIMBLE_EXT_ADV=y
+CONFIG_BT_NIMBLE_EXT_ADV_MAX_SIZE=251
+# CONFIG_BT_NIMBLE_ENABLE_PERIODIC_ADV is not set
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+# Advertising reports are the whole point here, so give them room: the
+# controller may queue up to 400 unprocessed reports (default 100) and the host
+# keeps 64 low-priority event buffers for them (default 8) before dropping.
+CONFIG_BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_NUM=400
+CONFIG_BT_NIMBLE_TRANSPORT_EVT_DISCARD_COUNT=64
+# No duplicate filtering is ever used, so the controller's duplicate cache is dead weight.
+# CONFIG_BT_CTRL_BLE_SCAN_DUPL is not set

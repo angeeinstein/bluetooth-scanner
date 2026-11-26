@@ -112,6 +112,28 @@ accept that the token is public — it's obscurity-level protection anyway. Rele
 git history, so the source tree stays clean, and this is exactly the mechanism a future pull-from-URL
 auto-update would fetch from.)
 
+## Bluetooth scanning
+
+The scanner starts at boot and never stops: it listens for Bluetooth Low Energy advertisements
+(legacy and BLE 5 extended) on all three advertising channels with no duplicate filter, so every
+packet is received and repeated packets from one device form a continuous RSSI series. If scanning
+ever stops, it is restarted within a second.
+
+- **Dashboard → Nearby Bluetooth devices** lists everything seen recently: name (cached per
+  address — many devices send their name only in the scan response), address and its kind, RSSI
+  now and averaged, packets per second, total packets, last seen, maker (from the manufacturer
+  data) and flags (`conn` connectable, `ext` extended advertising, `coded` long range). Click a
+  column to sort; filter by name, address or maker.
+- **Address kinds:** `public` and `static` addresses stay the same; `rpa` (resolvable private) and
+  `nrpa` addresses rotate every few minutes, so phones and most wearables show up as a new entry
+  after each rotation.
+- **Settings → Bluetooth:** *Active scanning* (default on) asks every scannable device for its
+  scan response; off = passive, the scanner never transmits. *Coded PHY* adds BLE 5 long range,
+  at the cost of fewer packets from ordinary devices.
+- **Wi-Fi and Bluetooth share one radio.** While Wi-Fi is on, the scanner gets less than 100 % of
+  the air time. A "100 % scan" mode that turns Wi-Fi off while logging comes with the scan log.
+- The ESP32-S3 has no Classic Bluetooth — BR/EDR-only devices can't be seen.
+
 ## Using it
 
 1. Flash and boot. Connect a phone/laptop to Wi-Fi **`BTScanner-Recorder`** / password

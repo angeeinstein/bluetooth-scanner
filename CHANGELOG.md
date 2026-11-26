@@ -14,6 +14,20 @@ before that are in the
 
 ## [Unreleased]
 
+### Added
+- **BLE scanner.** Scans continuously for Bluetooth Low Energy devices
+  (legacy and BLE 5 extended advertising) with no duplicate filter, so every
+  advertisement and scan response is received; restarts itself if scanning
+  ever stops. Active scanning by default (gets scan responses, where names
+  often are); passive and Coded-PHY (long range) scanning can be switched in
+  **Settings → Bluetooth**.
+- **Nearby devices list** on the Dashboard: name (cached per address),
+  address and its kind (public / static / rotating), RSSI now / average,
+  packets per second, total packets, last seen, maker and flags. Filter by
+  text, limit to the last 10 s / 1 min / 5 min, sort by any column.
+- Bluetooth state, reports per second and dropped reports in the Status card;
+  a **Scanner status** card in Settings → Bluetooth.
+
 ### Changed
 - **New identity: BTScanner.** The board now shows up as Wi-Fi
   `BTScanner-XXXXXX` and `btscanner-xxxxxx.local` (the shared name is

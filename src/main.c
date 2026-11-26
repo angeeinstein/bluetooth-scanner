@@ -8,6 +8,7 @@
 #include <stdio.h>
 
 #include "accel_capture.h"
+#include "ble_scanner.h"
 #include "device_id.h"
 #include "device_report.h"
 #include "esp_chip_info.h"
@@ -63,6 +64,12 @@ void app_main(void) {
 
     if (!wifi_manager_start()) {
         printf("main: Wi-Fi failed to start\n");
+    }
+
+    // After Wi-Fi: the radio is shared (coexistence), and Wi-Fi brings up the
+    // coexistence arbiter first. Warn-and-continue like every init above.
+    if (!ble_scanner_start()) {
+        printf("main: BLE scanner failed to start\n");
     }
 
     device_report_start(); // periodic local-IP reporting to the update server (best-effort)

@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 
 #include "accel_capture.h"
+#include "ble_scanner.h"
 #include "csv_export.h"
 #include "dashboard_html.h"
 #include "sync_trigger.h"
@@ -380,7 +381,7 @@ static char *build_status_json(void) {
     // it into a 500 that blanks the whole dashboard. Safe because
     // esp_http_server dispatches handlers serially on its single task, so this
     // is never re-entered. free_heap is reported so heap pressure is visible.
-    static char buf[4096];
+    static char buf[6144];
     const size_t cap = sizeof(buf);
     size_t off = 0;
 
@@ -613,6 +614,18 @@ static char *build_status_json(void) {
                      saved[i].connected ? "true" : "false", saved[i].auth_failed ? "true" : "false");
     }
     off = append(buf, cap, off, "]},");
+
+    ble_scanner_status_t ble;
+    ble_scanner_get_status(&ble);
+    off = append(buf, cap, off,
+                 "\"ble\":{\"ok\":%s,\"scanning\":%s,\"active\":%s,\"coded\":%s,"
+                 "\"rps\":%u,\"total\":%llu,\"drops\":%u,\"restarts\":%u,"
+                 "\"devices\":%u,\"recent\":%u,\"purges\":%u,\"err\":%d},",
+                 ble.ok ? "true" : "false", ble.scanning ? "true" : "false",
+                 ble.active ? "true" : "false", ble.coded ? "true" : "false",
+                 (unsigned)ble.reports_per_s, (unsigned long long)ble.reports_total,
+                 (unsigned)ble.queue_drops, (unsigned)ble.restarts, (unsigned)ble.devices_known,
+                 (unsigned)ble.devices_recent, (unsigned)ble.table_purges, ble.last_err);
 
     udp_stream_status_t udp;
     udp_stream_get_status(&udp);
@@ -2000,6 +2013,86 @@ static esp_err_t handler_settings_button_mark(httpd_req_t *req) {
     return handler_ok(req);
 }
 
+// --- BLE scanner ----------------------------------------------------------
+
+#define BLE_LIST_MAX 1024 // devices per /api/ble/devices response
+
+// GET /api/ble/devices?age=<seconds> -- devices seen within `age` s (default
+// 60, 0 = all known). Compact keys, since a busy place can list hundreds:
+//   a addr, k address kind, n name, r/ra/rn/rx RSSI last/avg/min/max,
+//   c reports, ps reports in the last second, f/l first/last seen (ms ago),
+//   m company id (-1 none), ap appearance, u first 16-bit service UUID,
+//   tx TX power (127 unknown), p props bits, ph PHY bits, tg target.
+// Streamed in chunks from a PSRAM snapshot, so the table lock is held only
+// for the copy, never while sending.
+static esp_err_t handler_ble_devices(httpd_req_t *req) {
+    char query[32], val[12];
+    uint32_t age_s = 60;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "age", val, sizeof(val)) == ESP_OK) {
+        age_s = (uint32_t)strtoul(val, NULL, 10);
+    }
+    ble_device_t *devs = heap_caps_malloc(sizeof(ble_device_t) * BLE_LIST_MAX, MALLOC_CAP_SPIRAM);
+    if (devs == NULL) {
+        return handler_error(req, "503 Service Unavailable", "out of memory");
+    }
+    int64_t now_us = 0;
+    int n = ble_scanner_snapshot(devs, BLE_LIST_MAX, age_s * 1000, &now_us);
+
+    httpd_resp_set_type(req, "application/json");
+    char chunk[2048];
+    size_t off = append(chunk, sizeof(chunk), 0, "{\"n\":%d,\"devices\":[", n);
+    for (int i = 0; i < n; i++) {
+        const ble_device_t *d = &devs[i];
+        char addr[18], name_esc[2 * BLE_NAME_MAX];
+        ble_addr_str(d->addr, addr);
+        json_escape(name_esc, sizeof(name_esc), d->name);
+        char item[400];
+        snprintf(item, sizeof(item),
+                 "%s{\"a\":\"%s\",\"k\":\"%s\",\"n\":\"%s\",\"r\":%d,\"ra\":%.1f,\"rn\":%d,"
+                 "\"rx\":%d,\"c\":%u,\"ps\":%u,\"f\":%lld,\"l\":%lld,\"m\":%d,\"ap\":%u,"
+                 "\"u\":%u,\"tx\":%d,\"p\":%u,\"ph\":%u,\"tg\":%d}",
+                 i == 0 ? "" : ",", addr, ble_addr_kind(d->addr_type, d->addr), name_esc,
+                 d->rssi_last, d->rssi_avg, d->rssi_min, d->rssi_max, (unsigned)d->count,
+                 (unsigned)d->rate, (long long)((now_us - d->first_us) / 1000),
+                 (long long)((now_us - d->last_us) / 1000),
+                 d->company_id == 0xFFFF ? -1 : (int)d->company_id, (unsigned)d->appearance,
+                 (unsigned)d->uuid16, d->tx_power, (unsigned)d->props_seen, (unsigned)d->phys_seen,
+                 d->target ? 1 : 0);
+        size_t il = strlen(item);
+        if (off + il >= sizeof(chunk)) {
+            if (httpd_resp_send_chunk(req, chunk, off) != ESP_OK) {
+                free(devs);
+                return ESP_FAIL; // client went away
+            }
+            off = 0;
+        }
+        memcpy(chunk + off, item, il);
+        off += il;
+    }
+    free(devs);
+    off = append(chunk, sizeof(chunk), off, "]}");
+    httpd_resp_send_chunk(req, chunk, off);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+// POST /api/ble/config {"active":0|1, "coded":0|1} -- either key optional.
+static esp_err_t handler_ble_config(httpd_req_t *req) {
+    char body[64];
+    if (!read_body(req, body, sizeof(body))) {
+        return handler_error(req, "400 Bad Request", "bad body");
+    }
+    int v = 0;
+    if (json_extract_int(json_find_value(body, "active"), &v)) {
+        ble_scanner_set_active(v != 0);
+    }
+    if (json_extract_int(json_find_value(body, "coded"), &v)) {
+        ble_scanner_set_coded(v != 0);
+    }
+    return handler_ok(req);
+}
+
 static esp_err_t handler_settings_auto_range(httpd_req_t *req) {
     char body[48];
     if (!read_body(req, body, sizeof(body))) {
@@ -2134,6 +2227,8 @@ static void register_handlers(httpd_handle_t server) {
         {.uri = "/", .method = HTTP_GET, .handler = handler_index},
         {.uri = "/ws", .method = HTTP_GET, .handler = handler_ws, .is_websocket = true},
         {.uri = "/api/status", .method = HTTP_GET, .handler = handler_status},
+        {.uri = "/api/ble/devices", .method = HTTP_GET, .handler = handler_ble_devices},
+        {.uri = "/api/ble/config", .method = HTTP_POST, .handler = handler_ble_config},
         {.uri = "/api/accel/config", .method = HTTP_POST, .handler = handler_accel_config},
         {.uri = "/api/accel/selftest", .method = HTTP_POST, .handler = handler_accel_selftest},
         {.uri = "/api/accel/remember", .method = HTTP_POST, .handler = handler_accel_remember},
@@ -2192,7 +2287,7 @@ static void register_handlers(httpd_handle_t server) {
 void dashboard_start(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 12288; // headroom for the TLS handshake in the /version check
-    config.max_uri_handlers = 60; // headroom above the ~49 currently registered (cheap: a pointer array)
+    config.max_uri_handlers = 60; // headroom above the ~51 currently registered (cheap: a pointer array)
     config.max_open_sockets = MAX_WS_CLIENTS;
     config.lru_purge_enable = true;
 

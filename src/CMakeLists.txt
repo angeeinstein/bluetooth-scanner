@@ -18,6 +18,7 @@ idf_component_register(
         heap
         lwip
         mdns
+        bt         # NimBLE host + controller (ble_scanner.c)
         wpa_supplicant # WPA2/WPA3-Enterprise EAP client (esp_eap_client.h) --
                        # only a PRIV_REQUIRES of esp_wifi, so not transitively
                        # exposed; must be required directly here.

@@ -31,6 +31,7 @@ at the level of detail needed to write about it or to onboard a new developer.
 13. [Boot sequence](#13-boot-sequence)
 14. [OTA firmware updates](#14-ota-firmware-updates)
 15. [Cross‑cutting design principles](#15-cross-cutting-design-principles)
+16. [BLE scanner](#16-ble-scanner)
 
 ---
 
@@ -647,3 +648,50 @@ A few ideas recur throughout the codebase and are worth naming:
 - **Real‑time first.** Core pinning, interrupt‑driven DMA capture, and the
   highest task priority in the system all exist to protect one invariant: the
   26.7 kHz stream never drops a sample.
+
+## 16. BLE scanner
+
+`ble_scanner.c` owns the Bluetooth side. NimBLE (host) and the ESP32‑S3 BLE
+controller are brought up by `nimble_port_init()` after Wi‑Fi (the radio is
+shared through the coexistence arbiter). Once the host syncs, one **extended
+discovery** runs forever: scan interval = window = 50 ms on the 1M PHY (and,
+if enabled, the Coded PHY), duration 0, **no duplicate filter**, accept‑all
+filter policy, active or passive per setting. Legacy PDUs arrive through the
+same extended‑report path, flagged as legacy.
+
+```mermaid
+flowchart LR
+  C[BLE controller] -->|HCI adv reports| H[NimBLE host task<br/>core 0]
+  H -->|copy, never blocks| Q[(PSRAM queue<br/>512 reports)]
+  Q --> P[ble_proc task<br/>core 1, prio 8]
+  P --> T[(device table<br/>4096 slots, PSRAM)]
+  P --> K[report hook<br/>scan logger]
+  T --> A["/api/ble/devices"]
+```
+
+- **GAP callback is copy‑only.** Each `BLE_GAP_EVENT_EXT_DISC` is copied into a
+  `ble_report_t` (timestamps, address, RSSI, props, PHYs, SID, raw data) and
+  queued with zero wait; a full queue increments `queue_drops`. The host task
+  is never held up, because a slow host makes the controller discard reports.
+- **Buffering.** Controller report flow control allows 400 unprocessed reports
+  (`BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_NUM`), the host keeps 64 discardable event
+  buffers (`BT_NIMBLE_TRANSPORT_EVT_DISCARD_COUNT`). Drops inside the controller
+  are *not* visible to the firmware — IDF 5.2.1's NimBLE doesn't surface the
+  controller's "adv lost" event — so `queue_drops` counts only host‑side loss.
+- **Processing task** (core 1, below the accelerometer drain and SD writer)
+  decodes the AD structures (`ble_adv_parse`: names, flags, TX power, service
+  UUIDs, service data, appearance, manufacturer data), updates the device
+  table, evaluates the optional target predicate and calls the report hook.
+  It also runs the 1 Hz housekeeping (per‑device packet rates, "recent" count)
+  and the **scan watchdog**, which restarts discovery whenever the host is
+  synced but no discovery is active.
+- **Device table.** Open‑addressing hash on address + type, 4096 slots in
+  PSRAM. Names are cached per address (a complete name replaces a shortened
+  one, packets without a name keep the cache). Random addresses rotate, so the
+  number of distinct addresses grows without bound in busy places: at 3072
+  entries the table is rebuilt keeping only the 2048 most recently seen.
+- **Settings** (`ble` NVS namespace): `active`, `coded`; changing one restarts
+  discovery immediately.
+- **Wi‑Fi coexistence.** While Wi‑Fi is on, the arbiter gives it radio slots,
+  so BLE gets less than 100 % air time; a mode that turns Wi‑Fi off while
+  logging is planned with the scan logger.
