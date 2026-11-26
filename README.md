@@ -7,12 +7,11 @@ records a motion profile of the device itself from the on-board IIS3DWB accelero
 dashboard, multi-network Wi-Fi, OTA updates, battery/charger handling and status LED carry over
 from VibraShock.
 
-> **Work in progress.** This repo started as a copy of VibraShock 1.6.0 and is being reworked step
-> by step: (1) rename and new identity — done; (2) BLE scanner with a live device list; (3) SD
-> scan log — a per-device summary by default, plus a switchable full capture of every
-> advertisement; (4) the accelerometer reduced to a ~100 Hz motion log plus still/moving, steps and
-> estimated speed; (5) removing the vibration analysis UI. Until a step lands, the sections below
-> still describe the inherited vibration-recorder behaviour.
+> **Work in progress.** This repo started as a copy of VibraShock 1.6.0. Done: new identity, the
+> BLE scanner with live device list, the SD scan log (every packet as a CSV row), target rules,
+> 100 % scan mode, and a web interface rebuilt around Bluetooth. Next: the accelerometer becomes a
+> ~100 Hz motion log plus still/moving, steps and estimated speed. Sections marked as inherited
+> still describe VibraShock behaviour.
 >
 > The ESP32-S3 radio is **BLE only** — Classic Bluetooth (BR/EDR) devices can't be discovered.
 
@@ -117,170 +116,97 @@ auto-update would fetch from.)
 The scanner starts at boot and never stops: it listens for Bluetooth Low Energy advertisements
 (legacy and BLE 5 extended) on all three advertising channels with no duplicate filter, so every
 packet is received and repeated packets from one device form a continuous RSSI series. If scanning
-ever stops, it is restarted within a second.
+ever stops, it is restarted within a second. The ESP32-S3 has no Classic Bluetooth — BR/EDR-only
+devices can't be seen.
 
-- **Dashboard → Nearby Bluetooth devices** lists everything seen recently: name (cached per
-  address — many devices send their name only in the scan response), address and its kind, RSSI
-  now and averaged, packets per second, total packets, last seen, maker (from the manufacturer
-  data) and flags (`conn` connectable, `ext` extended advertising, `coded` long range). Click a
-  column to sort; filter by name, address or maker.
-- **Address kinds:** `public` and `static` addresses stay the same; `rpa` (resolvable private) and
-  `nrpa` addresses rotate every few minutes, so phones and most wearables show up as a new entry
-  after each rotation.
-- **Settings → Bluetooth:** *Active scanning* (default on) asks every scannable device for its
-  scan response; off = passive, the scanner never transmits. *Coded PHY* adds BLE 5 long range,
-  at the cost of fewer packets from ordinary devices.
-- **Wi-Fi and Bluetooth share one radio.** While Wi-Fi is on, the scanner gets less than 100 % of
-  the air time. A "100 % scan" mode that turns Wi-Fi off while logging comes with the scan log.
-- The ESP32-S3 has no Classic Bluetooth — BR/EDR-only devices can't be seen.
+**Address kinds:** `public` and `static` addresses stay the same; `rpa` (resolvable private) and
+`nrpa` addresses rotate every few minutes, so phones and most wearables show up as a new entry
+after each rotation.
+
+**Wi-Fi and Bluetooth share one radio.** While Wi-Fi is on — even just the access point — the
+scanner gets only part of the air time and misses some packets. For measurements where that
+matters, turn on **100 % scan mode** (Settings → Bluetooth → Logging): Wi-Fi switches off 5 s after
+logging starts and comes back when logging stops (POWER double-click). The dashboard is unreachable
+in between; the log records `wifi_off` / `wifi_on` INFO rows.
 
 ## Using it
 
-1. Flash and boot. Connect a phone/laptop to Wi-Fi **`BTScanner-Recorder`** / password
-   **`recorder123`** (always on, regardless of infra Wi-Fi state).
-2. Open **http://192.168.4.1/** (or **http://btscanner.local/** via mDNS, on either the
-   SoftAP or an infra network — works out of the box on macOS/iOS/Linux/Android and in
-   Chrome/Edge on Windows; other Windows browsers may need Bonjour installed) — the
-   **Dashboard** tab shows a live accelerometer graph immediately. A status bar at the top gives
-   an always-visible glance at connection/charger/SD state (dot + short text for each); everyday
-   controls live in the tab below it. One-time/diagnostic cards (Wi-Fi setup, SD benchmark, full
-   charger detail + ship mode, chip info) are under the **Settings** tab to keep this screen
-   uncluttered.
-3. Before a real recording session, run the **SD benchmark** once from Settings (independent of
-   recording) to confirm your card can sustain the ~0.16MB/s the recorder needs, with margin — real
-   cards vary a lot.
-4. Optionally set full-scale range / LPF2 (both disabled while a recording is active), pick a
-   **Recording rate** (Full 26.7kHz, or a boxcar-decimated ~1kHz for a much smaller file when full
-   resolution isn't needed -- see below), give the recording a name, and hit **Start**. Files land
-   in `/sdcard/rec/`. The rate choice only applies to the next Start; the POWER-button double-click
-   shortcut always uses Full, since there's no UI there to choose from. The scale/LPF2 default back
-   to ±2g on every boot; if you mostly use a higher range, toggle **Remember scale & filter** on the
-   Settings tab's Accelerometer card and the last-applied choice is persisted (NVS) and restored at
-   boot instead.
-5. Optionally join an infra Wi-Fi network from the Settings tab's Wi-Fi card. Under **Add a
-   network**, **Scan for networks** lists nearby SSIDs (sorted by signal strength) to pick from
-   instead of typing one in, and a **Show/Hide** toggle next to the password field lets you
-   double-check what you typed. The device remembers **up to 8 networks** (smartphone-style): each
-   appears under **Saved networks** with a Connect (switch to it) and Forget button, and the active
-   one is badged. It auto-connects to whichever saved network is in range (last-connected first) and
-   keeps retrying forever if none are — no reboot needed. If a network's password changed, its row
-   shows **wrong password**; just re-add it with the new password to update it. If a connection
-   attempt fails, a **Reason** row explains why (e.g. "wrong password?", "network not found"). Once
-   connected, the board syncs time via NTP. If NTP isn't reachable at all (AP-only mode, or an
-   infra network with no internet uplink), any dashboard browser tab supplies its own clock as a
-   fallback instead — recordings still get a real timestamp either way, see below.
-6. For full-rate (undecimated 26.7kHz) access to the accelerometer data — the dashboard's own graph
-   stays at the decimated ~26.7Hz preview rate regardless — use the **High-Rate Streaming** card:
-   pick **Browser** (switches to the **Analyze** tab and streams to it over a dedicated binary
-   WebSocket — the only way a browser can get full-rate data, since it can't open raw UDP sockets)
-   or **UDP** (streams to an external receiver, e.g. a Raspberry Pi computing a live FFT; enter its
-   IP + port first). The two are mutually exclusive — starting one stops the other — and both are
-   independent of SD recording, which can run alongside either. The **Analyze** tab (time domain,
-   FFT and spectrogram) connects the stream only while it is open; see below for the packet format
-   both transports use. (The old `/live` URL now redirects to the single-page dashboard.)
+1. Flash and boot. Connect a phone/laptop to the board's Wi-Fi **`BTScanner-XXXXXX`** / password
+   **`recorder123`** (always on unless 100 % scan mode has switched it off), or join it to your own
+   network (Settings → Wi-Fi).
+2. Open **http://192.168.4.1/** (or **http://btscanner.local/**).
+3. **Dashboard** — *Nearby Bluetooth devices*: name (cached per address — many devices send it only
+   in the scan response), address and kind, RSSI now / average, packets per second, total, last
+   seen, maker (from the manufacturer data) and flags (`conn` connectable, `ext` BLE 5 extended,
+   `coded` long range). Filter by text, limit to the last 10 s / 1 min / 5 min, sort by any column,
+   click a row to open it in Analyze. Below: logging controls, the *Air activity* chart (reports/s
+   and devices heard per second, last 10 min), the Status card and the *Target devices* card.
+4. **Logging** — give the session a name (optional) and **Start logging**, or double-click POWER.
+   A single POWER click (or *Add marker*) places a marker. Every received packet becomes one CSV
+   row on the SD card (format below); the readout shows elapsed time, rows, size, write rate and
+   how long the card lasts at that rate. **Settings → Bluetooth → Logging** has *Start logging at
+   power-on* (field use, off by default), *100 % scan mode*, the POWER-click marker switch and *Copy
+   every log row to USB serial* (rows prefixed `BTS,`, with or without an SD session).
+5. **Target devices** (Settings → Bluetooth): one rule per line — `name:XXZ` (name starts with,
+   case-sensitive; the default), `addr:AA:BB:CC:DD:EE:FF` (exact address), `prefix:AA:BB:CC`
+   (address starts with). A matching device is flagged in every row (`target=1`), a `TARGET` row is
+   logged on its first match in a session and again after it was unseen for 30 s, the LED flashes
+   magenta three times, and the Dashboard lists it on top. Address rules only work reliably for
+   devices with a fixed address.
+6. **Analyze** — one device in detail: decoded fields, the last advertisement and scan response as
+   hex, its mean RSSI and packets per second over the last 2 minutes (kept on the board, so it's
+   there even if the page was closed), and the air-activity chart.
+7. **Recordings** — every logging session with its duration, rows, size and how it ended; download
+   the CSV part(s), `.log` and `.mark`, rename or delete. Files are in `/ble` on the card.
+8. **Settings → Scanning**: *Active scanning* (default on) asks every scannable device for its scan
+   response; off = passive, the scanner never transmits and is invisible to the devices around it.
+   *Coded PHY* adds BLE 5 long range, at the cost of fewer packets from ordinary devices.
 
-### Recorded file format
+The LED keeps VibraShock's vocabulary: blue breathing = logging, white blinks = start / stop /
+marker, red = error, amber ramp = SD card nearly full, cyan = Wi-Fi connected, **magenta = target
+device detected**.
 
-Each `.bin` starts with a 64-byte header (magic `VREC`, version 3, sample rate, FS range,
-sensitivity), then a table of time-sync checkpoints (`sync_table_bytes` long, given in the header),
-then raw little-endian `int16` X,Y,Z triplets — no per-sample timestamps (time = index ÷ the
-header's `sample_rate_hz`, the *measured* rate). **Samples start at `64 + sync_table_bytes`**, not
-at 64 (version-2 files have `sync_table_bytes = 0`); the exact layout is in
-[src/recording_format.h](src/recording_format.h). Start time is stored two ways, always both:
-`boot_time_us` (uptime in microseconds, always valid) and `wall_time_unix_s` (Unix epoch seconds,
-meaningful only if `wall_time_valid` is set — recording works fine with no wall clock at all, from
-NTP or a browser, at recording start; that row just reads 0/invalid). Load in Python:
+### Scan log format
 
-```python
-import numpy as np, struct
-hdr = open("rec_00001.bin", "rb").read(64)
-rate_hz, fs_g, sens_mg = struct.unpack_from("<3f", hdr, 8)
-sync_table_bytes = struct.unpack_from("<I", hdr, 40)[0]
-raw = np.fromfile("rec_00001.bin", dtype=np.int16, offset=64 + sync_table_bytes).reshape(-1, 3)
-g = raw * (sens_mg / 1000.0)
-```
+Each session is a set of files in `/ble` on the SD card, sharing a base name: the UTC start time
+`YYYY-MM-DD_HHMMSS` (or `log_NNNNN` if the clock wasn't set) plus `_<name>` if one was given. The
+card also carries a `FORMAT.md` that describes all of this — it's rewritten by the firmware
+whenever it changes, so it always matches the board's firmware.
 
-Both CSV export paths (on-device, `src/csv_export.c`; and the dashboard's client-side Web Worker
-conversion, `src/dashboard.html`) emit `sample_index,time_s,unix_time_s,x_g,y_g,z_g` -- `time_s` is
-always relative to the start of the recording; `unix_time_s` is `wall_time_unix_s + time_s` when
-`wall_time_valid`, otherwise left blank (most tools read a blank numeric CSV field as NaN) rather
-than a fabricated value.
+- `<base>.csv` — the log, rotating at 1 GB into `<base>_part2.csv`, ...; every part starts with
+  the header row, rows are never split across parts.
+- `<base>.log` — one line per event (`start`, `rotate`, `stop`, `full`, `error`) with board id,
+  firmware, UTC, uptime, bytes, rows, duration and dropped rows. No end line = power loss.
+- `<base>.mark` — the session's marker list (the markers are also rows in the CSV).
 
-The on-device converter is hardened for unattended field use. It **checks free space up front**
-(CSV is ~10-11x the raw `.bin`) and refuses with a clear "need ~X MB, Y MB free" rather than filling
-the card partway. It writes to a `.csv.tmp` staging file and only `rename()`s it to the final `.csv`
-on success, and `fsync()`s periodically -- so a power loss, a full card, or a low-battery cutoff
-mid-conversion never leaves a partial file that looks finished (the source `.bin` is opened
-read-only and is never at risk). The dashboard shows a live percentage and ETA, with a **Cancel**
-button that stops a running conversion and deletes its temp files. A running conversion is never
-interrupted pre-emptively -- the device keeps going until the low-battery **hard cutoff** (3.4V)
-fires, at which point the temp-file staging makes the partial safe to just re-run (see `power_ctrl.c`).
+CSV columns: `kind, uptime_ms, utc, addr, addr_kind, rssi, event, props, phy, sid, tx_power,
+data_status, name, name_src, company_id, mfg_data, ad_tx_power, flags, appearance, uuids, svc_data,
+data, target, info`.
 
-**Interrupted conversions resume automatically.** Alongside the `.csv.tmp` the converter keeps a
-tiny `.csv.prog` checkpoint (last sample + byte offset, `fsync`'d every 5 s). At boot -- once a
-valid battery reading exists -- the recording directory is scanned for a leftover `.csv.tmp` and:
-picks up from the checkpoint and finishes it (idempotent: re-converting a few seconds' overlap
-produces byte-identical output); *unless* the battery is low, in which case it's held and the
-dashboard offers **Resume** / **Discard** (so a low cell isn't drained finishing a conversion --
-plug in first). A conversion whose finished CSV would exceed ~2 GB can't be byte-resumed on this
-32-bit-`off_t` platform and is a deliberate, long job, so an interrupted one is simply deleted at
-boot and must be re-triggered on purpose. A missing source `.bin` or invalid checkpoint likewise
-discards the partial. (`csv_export_resume_on_boot()` in `src/csv_export.c`.)
+- `kind=ADV`: one received report — an advertisement or a scan response, legacy (`ADV_IND`,
+  `ADV_DIRECT_IND`, `ADV_SCAN_IND`, `ADV_NONCONN_IND`, `SCAN_RSP`) or extended (`EXT_ADV`,
+  `EXT_SCAN_RSP`). `data` is the complete raw payload as hex; the parsed columns are decoded from
+  it. `name` comes from the per-address cache, `name_src` says whether this packet carried it.
+  Extended payloads over 255 bytes arrive as several rows (`data_status` 1 = more follows).
+- `TARGET`, `MARK`, `STATUS` (once per second: reports/s, devices, drops, Wi-Fi, battery,
+  temperatures), `INFO` (`clock_set`, `clock_adjusted`, `wifi_off`, `wifi_on`, `rules_changed`),
+  `START` (scan settings, rules) and `STOP` rows carry key=value pairs in `info`.
+- `uptime_ms` is always there and monotonic; `utc` (ISO 8601, ms) only once the clock is set — by
+  NTP on a network with internet, or from the browser when the dashboard is opened. A
+  `clock_set` INFO row marks the moment, so earlier rows can be re-timed from `uptime_ms`.
+- Dropped data is counted, never silent: `drops` (reports lost before processing) and
+  `log_drops` (rows lost before the card) in every STATUS row. Reports the radio controller itself
+  discards under heavy load are not visible to the firmware.
 
-A `.log` sidecar next to each `.bin` records start/stop/rotation events with the capture settings
-and diagnostics at each point: the provenance stamp (`dev` = the recording board's `BTS-XXXXXX` id,
-`fw` = firmware version), the full-scale range (`fs_g`), sample rate, anti-alias filter (`lpf2`),
-accelerometer die temperature (`temp_c`, start and end), recording duration (`dur_s`), and the
-sensor-overrun / ring-buffer-drop counters (both should read zero for a clean capture). So any file
-can be traced to the exact device and firmware that produced it — useful across a fleet of boards.
-Files roll over automatically at ~3.5GB to stay under FAT32's 4GB-per-file limit.
+## Live streaming (kept from VibraShock, not in the UI)
 
-The card also explains itself: on every mount the firmware writes a short technical summary of all
-these files to **`/rec/FORMAT.md`** (header offsets, sync table, `.log` events/keys, `.aux.csv`
-and `.mark` columns), so a script or AI agent handed just the card doesn't have to guess or find
-this README. It's rewritten only when its text differs from the running firmware's, i.e. after a
-firmware update — don't edit it by hand.
+The firmware still has VibraShock's two full-rate accelerometer streams — UDP (`POST
+/api/udp/start`) and the binary WebSocket (`/wsstream`) — and `tools/udp_viewer.py`. They're kept
+on purpose as a basis for a later lower-rate stream (motion data or live sightings), but the web
+interface no longer controls them, and they still carry raw 26.7 kHz accelerometer data. The
+formats below are unchanged from VibraShock.
 
-An **`.aux.csv`** next to each part's `.bin` logs slow-changing side channels **once per second**
-(plus a row at the start and at the very end of the part). One row ≈ 150 bytes, ~3.5 MB for a
-full 6-hour part. Rows are keyed by `sample_index` into that part's `.bin` (time = `sample_index /
-sample_rate_hz`, like everything else); values are read when that block of samples is written,
-a fraction of a second after it was measured — irrelevant for quantities this slow. An empty field
-means "not available" (pandas/Excel read it as NaN). Columns:
-
-| Column | Meaning |
-|---|---|
-| `sample_index` | samples already in this part's `.bin` at this row |
-| `elapsed_s` | seconds since this part's file was opened (device uptime clock) |
-| `accel_temp_c` | IIS3DWB die temperature, 1/256 °C resolution — the sensor itself, closest to the measured surface |
-| `mcu_temp_c` | ESP32-S3 die temperature (board/enclosure heat; reads above ambient) |
-| `charger_temp_c` | BQ25628 charger die temperature |
-| `vbus_v`, `vbat_v` | USB input and battery voltage |
-| `ibus_ma`, `ibat_ma` | USB input current; battery current (+ charging, − discharging) |
-| `battery_pct` | estimated state of charge (empty when no battery is fitted) |
-| `charging` | 1 while the charger is charging, else 0 |
-| `rssi_dbm` | Wi-Fi signal strength (empty when not connected) |
-| `lost_samples` | samples lost to sensor FIFO overruns since this part started (should stay 0) |
-| `drops` | samples dropped before reaching this file since this part started (should stay 0) |
-| `clipped_x`, `clipped_y`, `clipped_z` | per axis: sensor samples at full scale since the previous row (counted at the full 26.7 kHz, also for decimated recordings) |
-
-```python
-import pandas as pd
-aux = pd.read_csv("rec_00001.aux.csv")
-aux["time_s"] = aux["sample_index"] / rate_hz  # same time base as the samples
-```
-
-**Recordings in the dashboard** are presented as objects, not raw files (like tracks in a music
-app): one entry per recording — rotation parts grouped under it — with a waveform "cover", a
-`clean ✓` / `⚠ drops` integrity badge, and the key settings inline (scale, rate, duration, CSV
-status). Tapping a recording opens a detail sheet decoding its header + `.log` (range, LPF2,
-temperature drift, samples, integrity, per-file download links, the raw log verbatim) and the
-convert/resume/cancel/delete actions; a `⋯` menu gives the same as quick actions. **Delete** removes
-the whole recording — every part's `.bin`, plus its `.csv`, `.log`, `.aux.csv`, and any interrupted-conversion
-`.csv.tmp`/`.csv.prog`. Grouping + metadata come from `GET /api/recordings` (streamed, one object
-per recording); whole-recording deletion from `POST /api/recordings/delete` (`src/web/dashboard.c`).
-
-### UDP stream packet format
+#### UDP stream packet format
 
 Sent to the target set from the dashboard's UDP card, `POST /api/udp/start` / `POST
 /api/udp/stop`. Full raw rate (26.7kHz, no decimation) — UDP was chosen over TCP deliberately: this
@@ -333,7 +259,7 @@ while True:
     xyz_g = [v * sens_g for v in samples]  # feed this into your FFT
 ```
 
-### `tools/udp_viewer.py` — desktop viewer with live FFT
+#### `tools/udp_viewer.py` — desktop viewer with live FFT
 
 A ready-to-run PyQt/pyqtgraph GUI that implements the receiver above plus a proper live view:
 
@@ -358,7 +284,7 @@ a `sample_index,time_s,x_g,y_g,z_g` column layout -- close to, but not identical
 own CSV export (below): the UDP/WS wire format carries no wall-clock field, so there's no
 `unix_time_s` column here, only `time_s` relative to whenever streaming started.
 
-### Binary WebSocket live-stream format (`/live` page)
+#### Binary WebSocket live-stream format (`/wsstream`)
 
 Same idea as the UDP stream, different transport: a browser can't open raw UDP sockets, so `/live`
 gets the full-rate feed over a dedicated binary WebSocket at `/wsstream` instead, started/stopped
@@ -390,6 +316,9 @@ stats) — deliberately close to `tools/udp_viewer.py`'s FFT tab feature set, so
 optional rather than required for a quick live look.
 
 ## Architecture
+
+> Inherited from VibraShock and only partly updated — the BLE scanner and the scan log are
+> described in [ARCHITECTURE.md](ARCHITECTURE.md) §16–17.
 
 - `src/accel_capture.c/.h` — the real-time path: a GPIO ISR on the sensor's FIFO-watermark
   interrupt wakes a dedicated drain task (core 1, highest priority) that DMA-bursts the FIFO over
@@ -545,6 +474,8 @@ default 160MHz) for headroom.
 - **Charger CE (IO18)**: driven LOW at boot to enable charging (active-low).
 - **POWER button (IO2)**: no internal pull — the external 100k network already provides the high
   level; enabling the internal pull-up would form a divider and prevent a valid LOW read.
+- **Buttons**: POWER (IO2) double-click starts/stops logging, single click marks, 3 s hold powers
+  off. BOOT (IO0) is unused.
 - **IIS3DWB SPI**: 8MHz (hard limit is 10MHz), mode 0. ODR is fixed at 26.7kHz — not a tunable
   parameter, it's the only rate this part supports.
 

@@ -32,7 +32,9 @@
 #define PREVIEW_DECIMATION 250
 #define PREVIEW_RING_CAPACITY (256 * sizeof(accel_preview_point_t))
 
-#define RECORDING_RING_CAPACITY (4 * 1024 * 1024) // ~25s of buffering at ~160KB/s
+// BTScanner no longer records raw acceleration (recorder.c only drains these
+// rings), so they're kept small until the motion pipeline replaces them.
+#define RECORDING_RING_CAPACITY (128 * 1024)
 
 // Boxcar-decimated recording rate for the optional lower-rate recording
 // mode: 26700Hz / 27 = 988.9Hz (not a round number -- an integer
@@ -43,7 +45,7 @@
 // decimation already relies on.
 #define RECORDING_DECIM_FACTOR 27
 #define RECORDING_DECIM_RATE_HZ (26700.0f / RECORDING_DECIM_FACTOR)
-#define RECORDING_DECIM_RING_CAPACITY (1024 * 1024) // ~170s of buffering at ~5.9KB/s
+#define RECORDING_DECIM_RING_CAPACITY (32 * 1024)
 
 // Full-rate (undecimated) stream ring for udp_stream.c -- much smaller than
 // the recording ring since dropping is expected/fine for a live stream

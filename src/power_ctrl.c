@@ -6,7 +6,6 @@
 #include <string.h>
 
 #include "bq25628.h"
-#include "csv_export.h"
 #include "driver/gpio.h"
 #include "driver/temperature_sensor.h"
 #include "esp_timer.h"
@@ -295,7 +294,7 @@ static void handle_double_click(void) {
         s_stop_pending = true;
         s_stop_deadline_us = esp_timer_get_time() + STOP_CONFIRM_TIMEOUT_MS * 1000;
         led_pattern_start(PATTERN_STOP_PENDING, ARRAY_LEN(PATTERN_STOP_PENDING), true);
-    } else if (!recorder_request_start(NULL, false)) { // button starts always use the full rate
+    } else if (!recorder_request_start(NULL)) {
         led_pattern_start(PATTERN_ERROR, ARRAY_LEN(PATTERN_ERROR), false);
     } else {
         // Accepted, but the actual file-open is asynchronous (the writer
@@ -731,7 +730,6 @@ static void poll_task(void *arg) {
     int64_t press_start_us = 0;
     bool press_active = false;
     bool long_press_fired = false;
-    bool resume_checked = false; // one-shot boot CSV-resume decision (needs a valid battery read)
     int status_tick = STATUS_REFRESH_TICKS; // refresh immediately on first loop
     bool hold_led_on = false;
     int64_t hold_led_last_toggle_us = 0;
@@ -828,19 +826,6 @@ static void poll_task(void *arg) {
         if (++status_tick >= STATUS_REFRESH_TICKS) {
             status_tick = 0;
             refresh_status();
-
-            // Once we have a real battery reading, decide what to do with any
-            // interrupted CSV conversion left on the card (auto-resume, or hold
-            // it for manual action if the cell is low). These s_status fields
-            // are written only by this task (in refresh_status, just above), so
-            // reading them here without the mutex is safe. The boot grace only
-            // defers the shutdown countdown -- low_warning already reflects a
-            // truly low cell -- so this gate is correct even seconds after boot.
-            if (!resume_checked && s_status.ok) {
-                resume_checked = true;
-                bool battery_low = s_status.on_battery && s_status.low_warning;
-                csv_export_resume_on_boot(battery_low);
-            }
         }
 
 #if STATUS_LED_WS2812

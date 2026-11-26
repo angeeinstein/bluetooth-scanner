@@ -84,6 +84,8 @@ typedef enum {
     WMSG_FORGET,    // remove a saved network (.ssid)
     WMSG_SET_PIN,   // pin .ssid to .bssid and reconnect
     WMSG_CLEAR_PIN, // remove the AP pin
+    WMSG_RADIO_OFF, // stop Wi-Fi entirely (AP + STA) -- BTScanner's 100 % scan mode
+    WMSG_RADIO_ON,  // start it again and reconnect
 } wmsg_type_t;
 
 typedef struct {
@@ -130,6 +132,10 @@ static bool s_restart_pending = false;
 static char s_forced_ssid[33] = "";
 
 static volatile int64_t s_last_activity_us = 0;
+
+// Wi-Fi stopped on request (100 % BLE scan mode). While set, disconnect
+// events and reconnect passes are ignored -- the radio is intentionally off.
+static volatile bool s_radio_off = false;
 
 // Spawned fresh on every got-IP (see on_got_ip). SNTP itself must be set up only
 // ONCE for the app's lifetime -- it keeps the clock synced and re-polls on its
@@ -482,6 +488,10 @@ static void build_order(void) {
 }
 
 static void start_pass(void) {
+    if (s_radio_off) {
+        s_phase = WPHASE_IDLE;
+        return;
+    }
     build_order();
     s_cand_idx = 0;
     s_cand_attempt = 0;
@@ -609,6 +619,9 @@ static void on_got_ip(void) {
 }
 
 static void on_disconnected(uint8_t reason) {
+    if (s_radio_off) {
+        return; // expected: esp_wifi_stop() disconnects the station
+    }
     if (xSemaphoreTake(s_status_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         strncpy(s_status.sta_fail_reason, disconnect_reason_str(reason),
                 sizeof(s_status.sta_fail_reason) - 1);
@@ -681,6 +694,23 @@ static void handle_msg(const wmsg_t *m) {
             strncpy(s_forced_ssid, m->ssid, sizeof(s_forced_ssid) - 1);
             s_forced_ssid[sizeof(s_forced_ssid) - 1] = '\0';
             request_restart();
+            break;
+        case WMSG_RADIO_OFF:
+            if (!s_radio_off) {
+                s_radio_off = true;
+                s_phase = WPHASE_IDLE;
+                esp_wifi_stop();
+                set_sta_state(WIFI_STA_IDLE, "", false);
+                printf("wifi_manager: Wi-Fi off (radio left to BLE)\n");
+            }
+            break;
+        case WMSG_RADIO_ON:
+            if (s_radio_off) {
+                s_radio_off = false;
+                esp_wifi_start(); // AP comes back with its stored config
+                printf("wifi_manager: Wi-Fi back on\n");
+                start_pass();
+            }
             break;
         case WMSG_CLEAR_PIN:
             if (xSemaphoreTake(s_status_mutex, portMAX_DELAY) == pdTRUE) {
@@ -972,6 +1002,18 @@ int wifi_manager_get_saved(wifi_saved_info_t *out, int max) {
 
 static bool post_msg(const wmsg_t *m) {
     return s_wmsg_queue != NULL && xQueueSend(s_wmsg_queue, m, pdMS_TO_TICKS(100)) == pdTRUE;
+}
+
+void wifi_manager_set_radio_enabled(bool enabled) {
+    if (s_wmsg_queue == NULL) {
+        return;
+    }
+    wmsg_t m = {.type = enabled ? WMSG_RADIO_ON : WMSG_RADIO_OFF};
+    xQueueSend(s_wmsg_queue, &m, pdMS_TO_TICKS(100));
+}
+
+bool wifi_manager_get_radio_enabled(void) {
+    return !s_radio_off;
 }
 
 bool wifi_manager_connect(const char *ssid, const char *password) {

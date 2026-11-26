@@ -8,6 +8,7 @@
 #endif
 
 #include "accel_capture.h"
+#include "ble_scanner.h"
 #include "esp_timer.h"
 #include "led_rgb.h"
 #include "power_ctrl.h"
@@ -30,7 +31,7 @@ static const rgb_t COL_GREEN = {0, 255, 0};
 static const rgb_t COL_CYAN = {0, 255, 255};
 static const rgb_t COL_AMBER = {255, 127, 0};
 // Defined for future use (not mapped to a state yet):
-static const rgb_t COL_MAGENTA __attribute__((unused)) = {255, 0, 255};
+static const rgb_t COL_MAGENTA = {255, 0, 255};
 static const rgb_t COL_VIOLET __attribute__((unused)) = {100, 0, 255};
 static const rgb_t COL_ROSE __attribute__((unused)) = {255, 50, 50};
 
@@ -183,6 +184,7 @@ static bool s_prev_rec = false;
 static int s_prev_marks = 0;
 static accel_selftest_state_t s_prev_st = ACCEL_SELFTEST_IDLE;
 static bool s_prev_wifi = false;
+static uint32_t s_prev_targets = 0; // ble_scanner target_events at the last tick
 
 void led_ind_set_test(bool active, uint8_t r, uint8_t g, uint8_t b) {
     s_test_active = active;
@@ -239,11 +241,7 @@ static int sd_stop_in_s(void) {
     if (!recorder_get_sd_space(&total, &freeb)) {
         return -1;
     }
-    float rate = recorder_get_current_sample_rate_hz();
-    if (rate <= 0) {
-        return -1;
-    }
-    double bps = (double)rate * 6.0; // 3 axes * int16
+    double bps = recorder_get_bytes_per_s();
     return bps > 0 ? (int)((double)freeb / bps) : -1;
 }
 
@@ -256,6 +254,8 @@ static void detect_events(void) {
     wifi_status_t w;
     wifi_manager_get_status(&w);
     bool wifi = (w.sta_state == WIFI_STA_CONNECTED);
+    ble_scanner_status_t ble;
+    ble_scanner_get_status(&ble);
 
     if (s_seeded) {
         if (rec && !s_prev_rec) {
@@ -274,6 +274,9 @@ static void detect_events(void) {
                 event_enqueue(COL_RED, 3, EV_ON_MS);
             }
         }
+        if (ble.target_events != s_prev_targets) {
+            event_enqueue(COL_MAGENTA, 3, EV_ON_MS); // a target device was detected
+        }
         if (wifi && !s_prev_wifi) {
             event_enqueue(COL_CYAN, 1, EV_WIFI_ON_MS); // (re)connected -- longer, easier to catch
         }
@@ -282,6 +285,7 @@ static void detect_events(void) {
     s_prev_marks = marks;
     s_prev_st = st.state;
     s_prev_wifi = wifi;
+    s_prev_targets = ble.target_events;
     s_seeded = true;
 }
 

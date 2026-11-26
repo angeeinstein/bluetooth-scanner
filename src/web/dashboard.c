@@ -16,7 +16,7 @@
 
 #include "accel_capture.h"
 #include "ble_scanner.h"
-#include "csv_export.h"
+#include "scan_log.h"
 #include "dashboard_html.h"
 #include "sync_trigger.h"
 #include "device_id.h"
@@ -24,6 +24,7 @@
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "esp_http_server.h"
 #include "esp_private/esp_clk.h"
 #include "esp_psram.h"
@@ -36,14 +37,13 @@
 #include "ota_cloud.h"
 #include "power_ctrl.h"
 #include "recorder.h"
-#include "recording_format.h"
 #include "sd_benchmark.h"
 #include "udp_stream.h"
 #include "version.h"
 #include "wifi_manager.h"
 #include "ws_stream.h"
 
-#define REC_DIR "/sdcard/rec"
+#define REC_DIR RECORDER_DIR // BTScanner sessions live in /sdcard/ble, not VibraShock's /rec
 
 static httpd_handle_t s_server = NULL;
 static volatile int s_active_downloads = 0;          // in-flight async file downloads
@@ -325,17 +325,6 @@ static const char *sd_bench_state_str(sd_bench_state_t s) {
     }
 }
 
-static const char *csv_export_state_str(csv_export_state_t s) {
-    switch (s) {
-        case CSV_EXPORT_IDLE: return "idle";
-        case CSV_EXPORT_RUNNING: return "running";
-        case CSV_EXPORT_DONE: return "done";
-        case CSV_EXPORT_FAILED: return "failed";
-        case CSV_EXPORT_CANCELLED: return "cancelled";
-        default: return "unknown";
-    }
-}
-
 static const char *accel_selftest_state_str(accel_selftest_state_t s) {
     switch (s) {
         case ACCEL_SELFTEST_IDLE: return "idle";
@@ -460,7 +449,7 @@ static char *build_status_json(void) {
                  accel_selftest_state_str(st.state), (double)st.change_mg_x, (double)st.change_mg_y,
                  (double)st.change_mg_z, 800.0, 3200.0);
 
-    char fname_esc[160];
+    char fname_esc[200];
     json_escape(fname_esc, sizeof(fname_esc), recorder_get_current_filename());
     char rec_err_esc[80];
     json_escape(rec_err_esc, sizeof(rec_err_esc), recorder_get_last_error());
@@ -468,15 +457,20 @@ static char *build_status_json(void) {
     json_escape(rec_notice_esc, sizeof(rec_notice_esc), recorder_get_last_notice());
     off = append(buf, cap, off,
                  "\"recording\":{\"active\":%s,\"filename\":\"%s\",\"bytes_written\":%llu,"
-                 "\"rate_hz\":%.1f,\"markers\":%d,\"last_error\":\"%s\",\"notice\":\"%s\"},",
+                 "\"rows\":%llu,\"elapsed_s\":%.1f,\"rate_bps\":%.0f,\"log_drops\":%u,"
+                 "\"markers\":%d,\"wifi_off_in\":%d,\"last_error\":\"%s\",\"notice\":\"%s\"},",
                  recorder_is_recording() ? "true" : "false", fname_esc,
                  (unsigned long long)recorder_get_bytes_written(),
-                 (double)recorder_get_current_sample_rate_hz(), recorder_marker_count(), rec_err_esc,
-                 rec_notice_esc);
+                 (unsigned long long)recorder_get_rows_written(), recorder_get_elapsed_s(),
+                 (double)recorder_get_bytes_per_s(), (unsigned)recorder_get_log_drops(),
+                 recorder_marker_count(), scan_log_wifi_off_in_s(), rec_err_esc, rec_notice_esc);
 
-    off = append(buf, cap, off, "\"settings\":{\"button_mark\":%s,\"auto_range\":%s},",
-                 power_ctrl_get_button_mark() ? "true" : "false",
-                 recorder_get_auto_range() ? "true" : "false");
+    scan_log_settings_t ls;
+    scan_log_get_settings(&ls);
+    off = append(buf, cap, off,
+                 "\"settings\":{\"button_mark\":%s,\"autostart\":%s,\"wifi_off\":%s,\"serial\":%s},",
+                 power_ctrl_get_button_mark() ? "true" : "false", ls.autostart ? "true" : "false",
+                 ls.wifi_off ? "true" : "false", ls.serial ? "true" : "false");
 
     uint64_t sd_total = 0, sd_free = 0;
     bool sd_space_ok = recorder_get_sd_space(&sd_total, &sd_free);
@@ -502,22 +496,6 @@ static char *build_status_json(void) {
                  (unsigned)bench.bytes_done, (double)bench.write_mb_s, (double)bench.read_mb_s,
                  (unsigned)bench.worst_chunk_ms, bench.checksum_ok ? "true" : "false",
                  bench_err_esc);
-
-    csv_export_result_t exp;
-    csv_export_get_result(&exp);
-    char exp_fname_esc[80], exp_err_esc[80];
-    json_escape(exp_fname_esc, sizeof(exp_fname_esc), exp.filename);
-    json_escape(exp_err_esc, sizeof(exp_err_esc), exp.error);
-    char resume_name[64];
-    char resume_esc[80];
-    json_escape(resume_esc, sizeof(resume_esc),
-                csv_export_get_pending(resume_name, sizeof(resume_name)) ? resume_name : "");
-    off = append(buf, cap, off,
-                 "\"csvexport\":{\"state\":\"%s\",\"filename\":\"%s\",\"total_samples\":%llu,"
-                 "\"samples_done\":%llu,\"eta_s\":%d,\"resume_file\":\"%s\",\"error\":\"%s\"},",
-                 csv_export_state_str(exp.state), exp_fname_esc,
-                 (unsigned long long)exp.total_samples, (unsigned long long)exp.samples_done,
-                 (int)exp.eta_s, resume_esc, exp_err_esc);
 
     power_status_t pw;
     power_ctrl_get_status(&pw);
@@ -620,12 +598,13 @@ static char *build_status_json(void) {
     off = append(buf, cap, off,
                  "\"ble\":{\"ok\":%s,\"scanning\":%s,\"active\":%s,\"coded\":%s,"
                  "\"rps\":%u,\"total\":%llu,\"drops\":%u,\"restarts\":%u,"
-                 "\"devices\":%u,\"recent\":%u,\"purges\":%u,\"err\":%d},",
+                 "\"devices\":%u,\"recent\":%u,\"purges\":%u,\"tev\":%u,\"err\":%d},",
                  ble.ok ? "true" : "false", ble.scanning ? "true" : "false",
                  ble.active ? "true" : "false", ble.coded ? "true" : "false",
                  (unsigned)ble.reports_per_s, (unsigned long long)ble.reports_total,
                  (unsigned)ble.queue_drops, (unsigned)ble.restarts, (unsigned)ble.devices_known,
-                 (unsigned)ble.devices_recent, (unsigned)ble.table_purges, ble.last_err);
+                 (unsigned)ble.devices_recent, (unsigned)ble.table_purges,
+                 (unsigned)ble.target_events, ble.last_err);
 
     udp_stream_status_t udp;
     udp_stream_get_status(&udp);
@@ -806,13 +785,11 @@ static esp_err_t handler_accel_selftest(httpd_req_t *req) {
 static esp_err_t handler_record_start(httpd_req_t *req) {
     char body[128];
     char name[64] = "";
-    bool decimated = false;
     if (read_body(req, body, sizeof(body))) {
         json_extract_string(json_find_value(body, "name"), name, sizeof(name));
-        json_extract_bool(json_find_value(body, "decimated"), &decimated);
     }
-    if (!recorder_request_start(name, decimated)) {
-        return handler_error(req, "409 Conflict", "already recording (or SD not mounted)");
+    if (!recorder_request_start(name)) {
+        return handler_error(req, "409 Conflict", recorder_get_last_error());
     }
     return handler_ok(req);
 }
@@ -1100,13 +1077,9 @@ static esp_err_t handler_time_set(httpd_req_t *req) {
 #define DL_THROTTLE_MAX_MS 60                     // floor: ~350 KB/s, never fully stalled
 #define DL_THROTTLE_DECAY_MS 10                   // delay removed each clean interval
 
-// Serves /sdcard/rec/<file> (raw .bin or a previously-exported .csv) as a
+// Serves RECORDER_DIR/<file> (a session's .csv part, .log or .mark) as a
 // chunked download -- files can be much larger than available RAM, so this
-// streams from the SD card rather than buffering the whole thing. Also the
-// fetch() target for client-side (in-browser) CSV conversion: the browser
-// downloads the raw .bin via this same endpoint and parses it itself, since
-// a modern browser's JS engine does that conversion far faster than the
-// ESP32 can.
+// streams from the SD card rather than buffering the whole thing.
 // The actual file-streaming work. Shared by the async download worker (the
 // normal path) and by a synchronous fallback if going async ever fails.
 static esp_err_t do_download(httpd_req_t *req) {
@@ -1174,7 +1147,7 @@ static esp_err_t do_download(httpd_req_t *req) {
     ssize_t n;
     bool send_failed = false;
     int throttle_ms = 0;
-    uint32_t last_drops = accel_capture_get_ring_drops();
+    uint32_t last_drops = recorder_get_log_drops();
     TickType_t last_eval = xTaskGetTickCount();
     while ((n = read(in_fd, chunk, dl_chunk)) > 0) {
         if (httpd_resp_send_chunk(req, (const char *)chunk, (size_t)n) != ESP_OK) {
@@ -1185,7 +1158,7 @@ static esp_err_t do_download(httpd_req_t *req) {
         if (recorder_is_recording()) {
             TickType_t now = xTaskGetTickCount();
             if (now - last_eval >= DL_THROTTLE_EVAL_TICKS) {
-                uint32_t drops = accel_capture_get_ring_drops();
+                uint32_t drops = recorder_get_log_drops();
                 if (drops != last_drops) { // recorder is losing samples -> back off
                     throttle_ms += DL_THROTTLE_STEP_MS;
                     if (throttle_ms > DL_THROTTLE_MAX_MS) {
@@ -1244,7 +1217,7 @@ static esp_err_t handler_download(httpd_req_t *req) {
     // made the second one 503 -- which is why a recording's markers sometimes
     // didn't show, or only appeared seconds later on the next list refresh.
     // They're only a few KB, so stream them inline and skip the one-at-a-time
-    // worker gate entirely (big .bin/.csv downloads still go through it).
+    // worker gate entirely (big .csv downloads still go through it).
     {
         char query[384];
         char filename[160] = "";
@@ -1283,402 +1256,200 @@ static esp_err_t handler_sdcard_remount(httpd_req_t *req) {
     return handler_ok(req);
 }
 
-// Returns the part number (>=2) if `name` is a rotation part file
-// ("<base>_part<N>.bin"), else 0. Part files are absorbed into their base
-// recording, not listed on their own.
-static int bin_part_number(const char *name) {
-    size_t nlen = strlen(name);
-    if (nlen < 4 || strcmp(name + nlen - 4, ".bin") != 0) {
-        return 0;
+// --- Logging sessions on the card ---------------------------------------------
+// A session is every file in RECORDER_DIR sharing one base name:
+// <base>.csv, <base>_partN.csv, <base>.log, <base>.mark.
+
+#define SESSION_MAX_FILES 512
+
+typedef struct {
+    char name[96];
+    uint32_t size;
+} dir_file_t;
+
+// If `name` belongs to session `base`, returns the suffix after the base
+// (".csv", "_part2.csv", ".log", ".mark"), else NULL.
+static const char *session_suffix(const char *name, const char *base) {
+    size_t bl = strlen(base);
+    if (strncmp(name, base, bl) != 0) {
+        return NULL;
     }
-    const char *last = NULL;
-    for (const char *s = name; (s = strstr(s, "_part")) != NULL; s++) {
-        last = s;
+    const char *suf = name + bl;
+    if (strcmp(suf, ".csv") == 0 || strcmp(suf, ".log") == 0 || strcmp(suf, ".mark") == 0) {
+        return suf;
     }
-    if (last == NULL) {
-        return 0;
-    }
-    const char *digits = last + 5;
-    const char *end = name + nlen - 4; // before ".bin"
-    if (digits >= end) {
-        return 0;
-    }
-    for (const char *c = digits; c < end; c++) {
+    if (strncmp(suf, "_part", 5) == 0) {
+        const char *c = suf + 5;
         if (!isdigit((unsigned char)*c)) {
-            return 0;
+            return NULL;
+        }
+        while (isdigit((unsigned char)*c)) c++;
+        if (strcmp(c, ".csv") == 0) {
+            return suf;
         }
     }
-    return atoi(digits);
+    return NULL;
 }
 
-// Reduces any recording filename to its grouping base: "rec_7_part2.bin" and
-// "rec_7.bin" both -> "rec_7". Also accepts a bare base unchanged.
-static void recording_base(const char *name, char *out, size_t outlen) {
-    snprintf(out, outlen, "%s", name);
-    size_t n = strlen(out);
-    if (n > 4 && strcmp(out + n - 4, ".bin") == 0) {
-        out[n - 4] = '\0';
+// The session base of a .csv file name ("x_part3.csv" -> "x"), or false if it
+// isn't a session CSV.
+static bool csv_base(const char *name, char *out, size_t out_len) {
+    size_t n = strlen(name);
+    if (n < 5 || strcmp(name + n - 4, ".csv") != 0) {
+        return false;
     }
-    char *last = NULL, *s = out;
-    while ((s = strstr(s, "_part")) != NULL) {
-        last = s;
-        s++;
+    snprintf(out, out_len, "%.*s", (int)(n - 4), name);
+    char *last = NULL;
+    for (char *c = out; (c = strstr(c, "_part")) != NULL; c++) {
+        last = c;
     }
     if (last != NULL && last[5] != '\0') {
-        bool all_digits = true;
+        bool digits = true;
         for (char *c = last + 5; *c; c++) {
-            if (!isdigit((unsigned char)*c)) {
-                all_digits = false;
-                break;
-            }
+            digits &= isdigit((unsigned char)*c) != 0;
         }
-        if (all_digits) {
+        if (digits) {
             *last = '\0';
         }
     }
+    return out[0] != '\0';
 }
 
-static bool read_recording_header(const char *path, recording_header_t *hdr) {
-    FILE *f = fopen(path, "rb");
-    if (f == NULL) {
-        return false;
+// Reads RECORDER_DIR into a PSRAM array; returns the count (or -1).
+static int read_session_dir(dir_file_t **out) {
+    DIR *d = opendir(REC_DIR);
+    if (d == NULL) {
+        return -1;
     }
-    bool ok = fread(hdr, sizeof(*hdr), 1, f) == 1 && memcmp(hdr->magic, RECORDING_MAGIC, 4) == 0;
-    fclose(f);
-    return ok;
+    dir_file_t *files = heap_caps_calloc(SESSION_MAX_FILES, sizeof(dir_file_t), MALLOC_CAP_SPIRAM);
+    if (files == NULL) {
+        closedir(d);
+        return -1;
+    }
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && n < SESSION_MAX_FILES) {
+        if (e->d_type == DT_DIR || strlen(e->d_name) >= sizeof(files[0].name)) {
+            continue;
+        }
+        memcpy(files[n].name, e->d_name, strlen(e->d_name) + 1); // length checked above
+        char path[200];
+        snprintf(path, sizeof(path), "%s/%s", REC_DIR, files[n].name);
+        struct stat st;
+        files[n].size = stat(path, &st) == 0 ? (uint32_t)st.st_size : 0;
+        n++;
+    }
+    closedir(d);
+    *out = files;
+    return n;
 }
 
+// Pulls `key=` values from the last and first lines of a session's .log.
 typedef struct {
-    bool have;
-    int lpf2;          // -1 unknown, 0 off, 1 on
-    char filter[12];   // "off"/"lowpass"/"highpass" ("" if unknown / older log)
-    int filter_hz;     // second-stage cutoff in Hz (0 if off/unknown)
-    float temp_start;  // NaN if unknown
-    float temp_end;
-    long overruns_start; // cumulative FIFO-overrun counter at recording start (-1 unknown)
-    long overruns;       // ...and at end; the badge shows the difference (overruns *during* this recording)
-    long drops_start;
-    long drops;
-    float clip_pct; // worst 1s-window clip% (last part's cumulative max), NaN if absent
-    int clipped;    // 1 = sustained clipping occurred, 0 = not, -1 = unknown
-} rec_log_t;
+    char start_utc[24];
+    char end[12]; // stop / full / error / "" (still open or power loss)
+    double dur_s;
+    unsigned long long rows;
+} session_log_t;
 
-static float log_first_float(const char *buf, const char *key) {
-    const char *p = strstr(buf, key);
-    return p ? strtof(p + strlen(key), NULL) : NAN;
-}
-static float log_last_float(const char *buf, const char *key) {
-    const char *p = buf, *last = NULL;
-    size_t kl = strlen(key);
-    while ((p = strstr(p, key)) != NULL) {
-        last = p;
-        p += kl;
-    }
-    return last ? strtof(last + kl, NULL) : NAN;
-}
-static long log_last_long(const char *buf, const char *key) {
-    const char *p = buf, *last = NULL;
-    size_t kl = strlen(key);
-    while ((p = strstr(p, key)) != NULL) {
-        last = p;
-        p += kl;
-    }
-    return last ? strtol(last + kl, NULL, 10) : -1;
-}
-static long log_first_long(const char *buf, const char *key) {
-    const char *p = strstr(buf, key);
-    return p ? strtol(p + strlen(key), NULL, 10) : -1;
-}
-
-// Parses one recording's tiny text .log. `overruns`/`drops`/`temp_end` take
-// their final (last) values; `temp_start`/`lpf2` the first (start line).
-static void parse_recording_log(const char *log_path, rec_log_t *out) {
-    FILE *f = fopen(log_path, "rb");
+static void parse_session_log(const char *base, session_log_t *out) {
+    memset(out, 0, sizeof(*out));
+    char path[200];
+    snprintf(path, sizeof(path), "%s/%s.log", REC_DIR, base);
+    FILE *f = fopen(path, "r");
     if (f == NULL) {
         return;
     }
-    char buf[512];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    buf[n] = '\0';
-    out->have = true;
-    const char *lp = strstr(buf, "lpf2=");
-    if (lp != NULL) {
-        out->lpf2 = (strncmp(lp + 5, "on", 2) == 0) ? 1 : 0;
-    }
-    const char *fp = strstr(buf, "filter="); // "filter=" won't match "filter_hz="
-    if (fp != NULL) {
-        fp += 7;
-        size_t i = 0;
-        while (fp[i] && fp[i] != ' ' && fp[i] != '\n' && i < sizeof(out->filter) - 1) {
-            out->filter[i] = fp[i];
-            i++;
+    char line[256];
+    bool first = true;
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char ev[12] = "";
+        sscanf(line, "%11s", ev);
+        const char *u = strstr(line, " utc=");
+        if (first && u != NULL) {
+            sscanf(u + 5, "%23s", out->start_utc);
+            first = false;
         }
-        out->filter[i] = '\0';
+        const char *r = strstr(line, " rows=");
+        if (r) out->rows = strtoull(r + 6, NULL, 10);
+        const char *du = strstr(line, " dur_s=");
+        if (du) out->dur_s = strtod(du + 7, NULL);
+        if (strcmp(ev, "start") == 0 || strcmp(ev, "rotate") == 0) {
+            out->end[0] = '\0';
+        } else {
+            snprintf(out->end, sizeof(out->end), "%s", ev);
+        }
     }
-    out->filter_hz = (int)log_last_long(buf, "filter_hz=");
-    out->temp_start = log_first_float(buf, "temp_c=");
-    out->temp_end = log_last_float(buf, "temp_c=");
-    out->overruns_start = log_first_long(buf, "overruns=");
-    out->overruns = log_last_long(buf, "overruns=");
-    out->drops_start = log_first_long(buf, "drops=");
-    out->drops = log_last_long(buf, "drops=");
-    out->clip_pct = log_last_float(buf, "clip_pct=");
-    out->clipped = (int)log_last_long(buf, "clipped=");
+    fclose(f);
 }
 
-// One JSON object per recording (rotation parts grouped under their base),
-// streamed as chunks so any number of recordings fits. Each carries enough for
-// the dashboard's recording cards: identity + decoded header metadata + the
-// integrity/temperature/LPF2 read from its .log.
+// GET /api/recordings -- one JSON object per session, streamed in chunks.
 static esp_err_t handler_recordings_list(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
-
-    DIR *d = opendir(REC_DIR);
-    if (d == NULL) {
+    dir_file_t *files = NULL;
+    int nf = read_session_dir(&files);
+    if (nf < 0) {
         httpd_resp_send(req, "[]", 2);
         return ESP_OK;
+    }
+    // The base of the session being written right now (if any).
+    char active_base[100] = "";
+    const char *cur = recorder_get_current_filename();
+    if (cur[0]) {
+        const char *slash = strrchr(cur, '/');
+        csv_base(slash ? slash + 1 : cur, active_base, sizeof(active_base));
     }
 
     httpd_resp_send_chunk(req, "[", 1);
     bool first = true;
-    struct dirent *entry;
-    while ((entry = readdir(d)) != NULL) {
-        size_t nlen = strlen(entry->d_name);
-        if (nlen < 4 || strcmp(entry->d_name + nlen - 4, ".bin") != 0) {
-            continue;
-        }
-        if (bin_part_number(entry->d_name) != 0) {
-            continue; // rotation part -- folded into its base below
-        }
+    for (int i = 0; i < nf; i++) {
+        char base[100];
+        // One entry per session: anchor on part 1 (<base>.csv) only.
+        if (!csv_base(files[i].name, base, sizeof(base))) continue;
+        char want[110];
+        snprintf(want, sizeof(want), "%s.csv", base);
+        if (strcmp(files[i].name, want) != 0) continue;
 
-        char base[128];
-        snprintf(base, sizeof(base), "%.*s", (int)(nlen - 4), entry->d_name); // strip ".bin"
-
-        uint64_t total_size = 0;
-        uint64_t total_samples = 0;
+        uint64_t bytes = 0;
         int parts = 0;
-        char first_bin[300] = "", last_log[300] = "";
-        char fs_list_json[160] = "["; // per-part full-scale ranges, e.g. [2,8,16]
-        size_t fj = 1;
-        bool fs_first = true;
-        char size_list_json[160] = "["; // per-part sizes in bytes, e.g. [3758096384,...]
-        size_t sj = 1;
-        bool size_first = true;
-        for (int pn = 1;; pn++) {
-            char pbin[300];
-            if (pn == 1) {
-                snprintf(pbin, sizeof(pbin), "%s/%s.bin", REC_DIR, base);
-            } else {
-                snprintf(pbin, sizeof(pbin), "%s/%s_part%d.bin", REC_DIR, base, pn);
-            }
-            struct stat pst;
-            if (stat(pbin, &pst) != 0) {
-                break;
-            }
-            parts++;
-            // st_size is a 32-bit off_t on this build, so a 2-4GB file wraps
-            // negative -- but the low 32 bits are the true size (FATFS caps
-            // files at 4GB), so read it back unsigned. Accumulate in 64-bit for
-            // multi-part totals.
-            uint32_t psize = (uint32_t)pst.st_size;
-            total_size += psize;
-            recording_header_t phdr;
-            bool have_phdr = read_recording_header(pbin, &phdr);
-            // Sample data starts after the header + the (v3) sync-checkpoint table;
-            // a v2 file has sync_table_bytes == 0, so this stays correct for both.
-            uint32_t data_off = (uint32_t)sizeof(recording_header_t) +
-                                (have_phdr ? phdr.sync_table_bytes : 0);
-            if (psize > data_off) {
-                total_samples += (uint64_t)(psize - data_off) / 6;
-            }
-            if (sj < sizeof(size_list_json) - 12) {
-                sj += snprintf(size_list_json + sj, sizeof(size_list_json) - sj, "%s%u",
-                               size_first ? "" : ",", (unsigned)psize);
-                size_first = false;
-            }
-            if (have_phdr && fj < sizeof(fs_list_json) - 12) {
-                fj += snprintf(fs_list_json + fj, sizeof(fs_list_json) - fj, "%s%d",
-                               fs_first ? "" : ",", (int)phdr.fs_range_g);
-                fs_first = false;
-            }
-            if (pn == 1) {
-                snprintf(first_bin, sizeof(first_bin), "%s", pbin);
-                snprintf(last_log, sizeof(last_log), "%s/%s.log", REC_DIR, base);
-            } else {
-                snprintf(last_log, sizeof(last_log), "%s/%s_part%d.log", REC_DIR, base, pn);
+        bool has_log = false, has_mark = false;
+        char flist[1024];
+        size_t fo = 0;
+        for (int j = 0; j < nf; j++) {
+            const char *suf = session_suffix(files[j].name, base);
+            if (suf == NULL) continue;
+            bytes += files[j].size;
+            if (strcmp(suf, ".log") == 0) has_log = true;
+            else if (strcmp(suf, ".mark") == 0) has_mark = true;
+            else {
+                parts++;
+                char ne[200];
+                json_escape(ne, sizeof(ne), files[j].name);
+                fo = append(flist, sizeof(flist), fo, "%s{\"name\":\"%s\",\"bytes\":%u}", fo ? "," : "", ne,
+                            (unsigned)files[j].size);
             }
         }
-        if (parts == 0) {
-            continue; // vanished between readdir and stat
+        session_log_t lg;
+        parse_session_log(base, &lg);
+        bool active = strcmp(base, active_base) == 0;
+        char base_esc[200];
+        json_escape(base_esc, sizeof(base_esc), base);
+        char item[1500];
+        int n = snprintf(item, sizeof(item),
+                         "%s{\"id\":\"%s\",\"bytes\":%llu,\"parts\":%d,\"files\":[%s],\"log\":%s,\"mark\":%s,"
+                         "\"start\":\"%s\",\"dur_s\":%.1f,\"rows\":%llu,\"end\":\"%s\",\"active\":%s}",
+                         first ? "" : ",", base_esc, (unsigned long long)bytes, parts, fo ? flist : "",
+                         has_log ? "true" : "false", has_mark ? "true" : "false", lg.start_utc, lg.dur_s,
+                         lg.rows, lg.end, active ? "true" : "false");
+        if (n > 0) {
+            httpd_resp_send_chunk(req, item, strlen(item));
+            first = false;
         }
-        snprintf(fs_list_json + fj, sizeof(fs_list_json) - fj, "]");
-        snprintf(size_list_json + sj, sizeof(size_list_json) - sj, "]");
-
-        recording_header_t hdr;
-        bool have_hdr = read_recording_header(first_bin, &hdr);
-        double fs_g = have_hdr ? hdr.fs_range_g : 0;
-        double rate_hz = have_hdr ? hdr.sample_rate_hz : 0;
-        double sens_mg = have_hdr ? hdr.sensitivity_mg_per_lsb : 0;
-        bool wall_valid = have_hdr && hdr.wall_time_valid;
-
-        char date[24] = "";
-        if (wall_valid) {
-            time_t t = (time_t)hdr.wall_time_unix_s;
-            struct tm tm_info;
-            localtime_r(&t, &tm_info);
-            strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S", &tm_info);
-        }
-
-        rec_log_t lg = {.lpf2 = -1, .temp_start = NAN, .temp_end = NAN, .overruns_start = -1,
-                        .overruns = -1, .drops_start = -1, .drops = -1, .clip_pct = NAN, .clipped = -1};
-        char first_log[300];
-        snprintf(first_log, sizeof(first_log), "%s/%s.log", REC_DIR, base);
-        parse_recording_log(first_log, &lg);
-        if (parts > 1) {
-            rec_log_t lg2 = {.lpf2 = -1, .temp_start = NAN, .temp_end = NAN, .overruns_start = -1,
-                             .overruns = -1, .drops_start = -1, .drops = -1, .clip_pct = NAN, .clipped = -1};
-            parse_recording_log(last_log, &lg2);
-            if (lg2.have) {
-                lg.temp_end = lg2.temp_end;
-                lg.overruns = lg2.overruns; // end value comes from the last part's log
-                lg.drops = lg2.drops;
-                lg.clip_pct = lg2.clip_pct; // last part carries the recording's cumulative max
-                lg.clipped = lg2.clipped;
-            }
-        }
-
-        // Report overruns/drops that occurred *during this recording* (end minus
-        // the start baseline of the cumulative-since-boot counters), not the raw
-        // counter -- otherwise every recording inherits the couple of benign FIFO
-        // overruns that happen at boot. -1 (unknown) if no baseline was logged.
-        long ov_delta = (lg.overruns_start >= 0 && lg.overruns >= lg.overruns_start)
-                            ? lg.overruns - lg.overruns_start
-                            : -1;
-        long dr_delta = (lg.drops_start >= 0 && lg.drops >= lg.drops_start)
-                            ? lg.drops - lg.drops_start
-                            : -1;
-
-        char csv_path[300];
-        snprintf(csv_path, sizeof(csv_path), "%s/%s.csv", REC_DIR, base);
-        struct stat cst;
-        bool has_csv = (stat(csv_path, &cst) == 0);
-        long long csv_size = has_csv ? (long long)(uint32_t)cst.st_size : -1; // unsigned: see above
-
-        char mark_path[300];
-        snprintf(mark_path, sizeof(mark_path), "%s/%s.mark", REC_DIR, base);
-        struct stat mst;
-        bool has_mark = (stat(mark_path, &mst) == 0);
-
-        // 1 Hz aux side-channel file (one per part; part 1's presence stands for all).
-        char aux_path[300];
-        snprintf(aux_path, sizeof(aux_path), "%s/%s.aux.csv", REC_DIR, base);
-        struct stat ast;
-        bool has_aux = (stat(aux_path, &ast) == 0);
-
-        char id_esc[160], date_esc[48];
-        json_escape(id_esc, sizeof(id_esc), base);
-        json_escape(date_esc, sizeof(date_esc), date);
-
-        char temp_start_s[16], temp_end_s[16], lpf2_s[8];
-        if (isnan(lg.temp_start)) {
-            strcpy(temp_start_s, "null");
-        } else {
-            snprintf(temp_start_s, sizeof(temp_start_s), "%.1f", (double)lg.temp_start);
-        }
-        if (isnan(lg.temp_end)) {
-            strcpy(temp_end_s, "null");
-        } else {
-            snprintf(temp_end_s, sizeof(temp_end_s), "%.1f", (double)lg.temp_end);
-        }
-        strcpy(lpf2_s, lg.lpf2 < 0 ? "null" : (lg.lpf2 ? "true" : "false"));
-        char filter_s[24];
-        if (lg.filter[0] == '\0') {
-            strcpy(filter_s, "null");
-        } else {
-            snprintf(filter_s, sizeof(filter_s), "\"%s\"", lg.filter);
-        }
-
-        char obj[1024];
-        double clip_pct_v = isnan(lg.clip_pct) ? 0.0 : (double)lg.clip_pct;
-        size_t ol = append(obj, sizeof(obj), 0,
-                           "%s{\"id\":\"%s\",\"date\":\"%s\",\"parts\":%d,\"size\":%llu,"
-                           "\"size_list\":%s,\"samples\":%llu,\"fs_g\":%.0f,\"fs_list\":%s,"
-                           "\"rate_hz\":%.1f,\"sens_mg\":%.4f,\"lpf2\":%s,\"filter\":%s,"
-                           "\"filter_hz\":%d,\"temp_start\":%s,"
-                           "\"temp_end\":%s,\"overruns\":%ld,\"drops\":%ld,\"clip_pct\":%.2f,"
-                           "\"clipped\":%s,\"wall_valid\":%s,\"has_csv\":%s,\"csv_size\":%lld,"
-                           "\"has_log\":%s,\"has_mark\":%s,\"has_aux\":%s}",
-                           first ? "" : ",", id_esc, date_esc, parts,
-                           (unsigned long long)total_size, size_list_json,
-                           (unsigned long long)total_samples, fs_g,
-                           fs_list_json, rate_hz, sens_mg, lpf2_s, filter_s, lg.filter_hz,
-                           temp_start_s, temp_end_s, ov_delta,
-                           dr_delta, clip_pct_v, (lg.clipped == 1) ? "true" : "false",
-                           wall_valid ? "true" : "false", has_csv ? "true" : "false", csv_size,
-                           lg.have ? "true" : "false", has_mark ? "true" : "false",
-                           has_aux ? "true" : "false");
-        httpd_resp_send_chunk(req, obj, ol);
-        first = false;
     }
-    closedir(d);
+    free(files);
     httpd_resp_send_chunk(req, "]", 1);
-    httpd_resp_send_chunk(req, NULL, 0); // terminate the chunked response
+    httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
-}
-
-static esp_err_t handler_export_csv(httpd_req_t *req) {
-    char body[128];
-    if (!read_body(req, body, sizeof(body))) {
-        return handler_error(req, "400 Bad Request", "bad body");
-    }
-    char filename[64] = "";
-    if (!json_extract_string(json_find_value(body, "filename"), filename, sizeof(filename))) {
-        return handler_error(req, "400 Bad Request", "missing filename");
-    }
-    if (!csv_export_start(filename)) {
-        return handler_error(req, "409 Conflict",
-                              "already exporting, recording active, or bad filename");
-    }
-    return handler_ok(req);
-}
-
-static esp_err_t handler_export_resume(httpd_req_t *req) {
-    char body[128];
-    if (!read_body(req, body, sizeof(body))) {
-        return handler_error(req, "400 Bad Request", "bad body");
-    }
-    char filename[64] = "";
-    if (!json_extract_string(json_find_value(body, "filename"), filename, sizeof(filename))) {
-        return handler_error(req, "400 Bad Request", "missing filename");
-    }
-    if (!csv_export_resume(filename)) {
-        return handler_error(req, "409 Conflict", "nothing pending, or already exporting");
-    }
-    return handler_ok(req);
-}
-
-static esp_err_t handler_export_discard(httpd_req_t *req) {
-    char body[128];
-    if (!read_body(req, body, sizeof(body))) {
-        return handler_error(req, "400 Bad Request", "bad body");
-    }
-    char filename[64] = "";
-    if (!json_extract_string(json_find_value(body, "filename"), filename, sizeof(filename))) {
-        return handler_error(req, "400 Bad Request", "missing filename");
-    }
-    if (!csv_export_discard(filename)) {
-        return handler_error(req, "409 Conflict", "nothing pending for that file");
-    }
-    return handler_ok(req);
-}
-
-// No body needed -- only one conversion runs at a time.
-static esp_err_t handler_export_cancel(httpd_req_t *req) {
-    if (!csv_export_cancel()) {
-        return handler_error(req, "409 Conflict", "no conversion running");
-    }
-    return handler_ok(req);
 }
 
 static esp_err_t handler_udp_start(httpd_req_t *req) {
@@ -1726,202 +1497,295 @@ static esp_err_t handler_wsstream_stop(httpd_req_t *req) {
     return handler_ok(req);
 }
 
-// Deletes a recording's .bin plus any sidecar (.csv export, .log overrun
-// log) it may have. Refuses to delete the file currently being written to.
+// The base of the session being written, or "" -- delete/rename refuse it.
+static void active_session_base(char *out, size_t out_len) {
+    out[0] = '\0';
+    const char *cur = recorder_get_current_filename();
+    if (cur[0]) {
+        const char *slash = strrchr(cur, '/');
+        csv_base(slash ? slash + 1 : cur, out, out_len);
+    }
+}
+
+static bool valid_base(const char *b) {
+    return b[0] != '\0' && strchr(b, '/') == NULL && strstr(b, "..") == NULL;
+}
+
+// POST /api/recordings/delete {"id":"<base>"} -- removes every file of the session.
 static esp_err_t handler_recordings_delete(httpd_req_t *req) {
-    char body[128];
+    char body[192];
     if (!read_body(req, body, sizeof(body))) {
         return handler_error(req, "400 Bad Request", "bad body");
     }
-    char filename[128] = "";
-    if (!json_extract_string(json_find_value(body, "filename"), filename, sizeof(filename))) {
-        return handler_error(req, "400 Bad Request", "missing filename");
+    char id[120] = "";
+    if (!json_extract_string(json_find_value(body, "id"), id, sizeof(id)) || !valid_base(id)) {
+        return handler_error(req, "400 Bad Request", "missing or invalid id");
     }
-    if (filename[0] == '\0' || strstr(filename, "..") != NULL || strchr(filename, '/') != NULL) {
-        return handler_error(req, "400 Bad Request", "invalid filename");
+    char active[100];
+    active_session_base(active, sizeof(active));
+    if (strcmp(id, active) == 0) {
+        return handler_error(req, "409 Conflict", "this session is still being logged - stop it first");
     }
-
-    // Delete the whole recording: every rotation part's .bin, plus its .csv,
-    // .log, .mark, .aux.csv, and any interrupted-conversion .csv.tmp/.csv.prog.
-    char base[128];
-    recording_base(filename, base, sizeof(base));
-    if (base[0] == '\0') {
-        return handler_error(req, "400 Bad Request", "invalid filename");
+    dir_file_t *files = NULL;
+    int nf = read_session_dir(&files);
+    if (nf < 0) {
+        return handler_error(req, "503 Service Unavailable", "SD card not available");
     }
-
-    // Refuse while this recording is mid-conversion (the converter holds a
-    // part's .bin open) -- cancel first.
-    csv_export_result_t exp;
-    csv_export_get_result(&exp);
-    if (exp.state == CSV_EXPORT_RUNNING) {
-        char exp_base[128];
-        recording_base(exp.filename, exp_base, sizeof(exp_base));
-        if (strcmp(exp_base, base) == 0) {
-            return handler_error(req, "409 Conflict", "conversion in progress for this recording");
+    int removed = 0;
+    for (int i = 0; i < nf; i++) {
+        if (session_suffix(files[i].name, id) != NULL) {
+            char path[200];
+            snprintf(path, sizeof(path), "%s/%s", REC_DIR, files[i].name);
+            removed += (remove(path) == 0);
         }
     }
-
-    // Refuse if any part of it is the recording currently being written.
-    const char *active = recorder_get_current_filename();
-    if (active[0] != '\0') {
-        const char *aname = strrchr(active, '/');
-        aname = aname ? aname + 1 : active;
-        char active_base[128];
-        recording_base(aname, active_base, sizeof(active_base));
-        if (strcmp(active_base, base) == 0) {
-            return handler_error(req, "409 Conflict", "recording is currently active");
-        }
-    }
-
-    bool any_deleted = false;
-    for (int pn = 1;; pn++) {
-        char stem[200];
-        if (pn == 1) {
-            snprintf(stem, sizeof(stem), "%s/%s", REC_DIR, base);
-        } else {
-            snprintf(stem, sizeof(stem), "%s/%s_part%d", REC_DIR, base, pn);
-        }
-        char p[220];
-        snprintf(p, sizeof(p), "%s.bin", stem);
-        struct stat st;
-        bool bin_exists = (stat(p, &st) == 0);
-        if (!bin_exists && pn > 1) {
-            break; // no further parts
-        }
-        if (unlink(p) == 0) {
-            any_deleted = true;
-        }
-        snprintf(p, sizeof(p), "%s.csv", stem);
-        if (unlink(p) == 0) {
-            any_deleted = true;
-        }
-        snprintf(p, sizeof(p), "%s.log", stem);
-        if (unlink(p) == 0) {
-            any_deleted = true;
-        }
-        snprintf(p, sizeof(p), "%s.csv.tmp", stem);
-        unlink(p);
-        snprintf(p, sizeof(p), "%s.csv.prog", stem);
-        unlink(p);
-        snprintf(p, sizeof(p), "%s.mark", stem);
-        unlink(p);
-        snprintf(p, sizeof(p), "%s.aux.csv", stem);
-        unlink(p);
-        if (!bin_exists) {
-            break; // part 1's .bin was already gone -- sidecars (if any) now cleaned
-        }
-    }
-
-    if (!any_deleted) {
-        return handler_error(req, "404 Not Found", "recording not found");
+    free(files);
+    if (removed == 0) {
+        return handler_error(req, "404 Not Found", "no such session");
     }
     return handler_ok(req);
 }
 
-// Sanitizes a user-supplied recording name into a safe filename base: keeps
-// letters/digits/_/-, turns spaces into underscores, drops everything else
-// (so no dots, slashes, or path tricks can slip in).
+// Keeps letters/digits/_/-, turns spaces into underscores, drops the rest.
 static void sanitize_rec_name(const char *in, char *out, size_t out_len) {
     size_t j = 0;
-    for (size_t i = 0; in != NULL && in[i] != '\0' && j < out_len - 1; i++) {
+    for (size_t i = 0; in[i] != '\0' && j + 1 < out_len; i++) {
         char c = in[i];
-        if (c == ' ') {
-            c = '_';
-        }
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-            c == '_' || c == '-') {
+        if (isalnum((unsigned char)c) || c == '_' || c == '-') {
             out[j++] = c;
+        } else if (c == ' ') {
+            out[j++] = '_';
         }
     }
     out[j] = '\0';
 }
 
-// Renames a whole recording (every rotation part's .bin plus its .csv/.log/
-// .mark/.csv.tmp/.csv.prog) to a new base name. Refuses while the recording is
-// active or being converted, or if the new name is already taken.
+// POST /api/recordings/rename {"id":"<base>","name":"<new base>"} -- renames
+// every file of the session. Refuses the active session and taken names.
 static esp_err_t handler_recordings_rename(httpd_req_t *req) {
-    char body[224];
+    char body[288];
     if (!read_body(req, body, sizeof(body))) {
         return handler_error(req, "400 Bad Request", "bad body");
     }
-    char id[128] = "", name[128] = "";
+    char id[120] = "", name_raw[120] = "", name[96];
     if (!json_extract_string(json_find_value(body, "id"), id, sizeof(id)) ||
-        !json_extract_string(json_find_value(body, "name"), name, sizeof(name))) {
+        !json_extract_string(json_find_value(body, "name"), name_raw, sizeof(name_raw)) || !valid_base(id)) {
         return handler_error(req, "400 Bad Request", "missing id or name");
     }
-    if (strchr(id, '/') != NULL || strstr(id, "..") != NULL) {
-        return handler_error(req, "400 Bad Request", "invalid id");
+    sanitize_rec_name(name_raw, name, sizeof(name));
+    if (name[0] == '\0') {
+        return handler_error(req, "400 Bad Request", "name has no usable characters");
     }
-    char old_base[128], new_base[128];
-    recording_base(id, old_base, sizeof(old_base));
-    sanitize_rec_name(name, new_base, sizeof(new_base));
-    if (old_base[0] == '\0' || new_base[0] == '\0') {
-        return handler_error(req, "400 Bad Request", "invalid name");
+    if (strcmp(id, name) == 0) {
+        return handler_ok(req);
     }
-    if (strcmp(old_base, new_base) == 0) {
-        return handler_ok(req); // nothing to do
+    char active[100];
+    active_session_base(active, sizeof(active));
+    if (strcmp(id, active) == 0) {
+        return handler_error(req, "409 Conflict", "this session is still being logged - stop it first");
     }
-
-    csv_export_result_t exp;
-    csv_export_get_result(&exp);
-    if (exp.state == CSV_EXPORT_RUNNING) {
-        char eb[128];
-        recording_base(exp.filename, eb, sizeof(eb));
-        if (strcmp(eb, old_base) == 0) {
-            return handler_error(req, "409 Conflict", "conversion in progress for this recording");
+    dir_file_t *files = NULL;
+    int nf = read_session_dir(&files);
+    if (nf < 0) {
+        return handler_error(req, "503 Service Unavailable", "SD card not available");
+    }
+    for (int i = 0; i < nf; i++) {
+        if (session_suffix(files[i].name, name) != NULL) {
+            free(files);
+            return handler_error(req, "409 Conflict", "a session with that name already exists");
         }
     }
-    const char *active = recorder_get_current_filename();
-    if (active[0] != '\0') {
-        const char *an = strrchr(active, '/');
-        an = an ? an + 1 : active;
-        char ab[128];
-        recording_base(an, ab, sizeof(ab));
-        if (strcmp(ab, old_base) == 0) {
-            return handler_error(req, "409 Conflict", "recording is currently active");
-        }
-    }
-
-    struct stat st;
-    char check[220];
-    snprintf(check, sizeof(check), "%s/%s.bin", REC_DIR, new_base);
-    if (stat(check, &st) == 0) {
-        return handler_error(req, "409 Conflict", "a recording with that name already exists");
-    }
-
-    static const char *exts[] = {".bin", ".csv", ".log", ".mark", ".aux.csv", ".csv.tmp", ".csv.prog"};
-    bool any = false;
-    for (int pn = 1;; pn++) {
-        char old_stem[200], new_stem[200];
-        if (pn == 1) {
-            snprintf(old_stem, sizeof(old_stem), "%s/%s", REC_DIR, old_base);
-            snprintf(new_stem, sizeof(new_stem), "%s/%s", REC_DIR, new_base);
+    int renamed = 0;
+    bool failed = false;
+    for (int i = 0; i < nf; i++) {
+        const char *suf = session_suffix(files[i].name, id);
+        if (suf == NULL) continue;
+        char from[200], to[200];
+        snprintf(from, sizeof(from), "%s/%s", REC_DIR, files[i].name);
+        snprintf(to, sizeof(to), "%s/%s%s", REC_DIR, name, suf);
+        if (rename(from, to) == 0) {
+            renamed++;
         } else {
-            snprintf(old_stem, sizeof(old_stem), "%s/%s_part%d", REC_DIR, old_base, pn);
-            snprintf(new_stem, sizeof(new_stem), "%s/%s_part%d", REC_DIR, new_base, pn);
-        }
-        char obin[220];
-        snprintf(obin, sizeof(obin), "%s.bin", old_stem);
-        bool bin_exists = (stat(obin, &st) == 0);
-        if (!bin_exists && pn > 1) {
-            break; // no more parts
-        }
-        for (size_t e = 0; e < sizeof(exts) / sizeof(exts[0]); e++) {
-            char of[224], nf[224];
-            snprintf(of, sizeof(of), "%s%s", old_stem, exts[e]);
-            snprintf(nf, sizeof(nf), "%s%s", new_stem, exts[e]);
-            if (stat(of, &st) == 0 && rename(of, nf) == 0) {
-                any = true;
-            }
-        }
-        if (!bin_exists) {
-            break; // part 1 had no .bin
+            failed = true;
         }
     }
-    if (!any) {
-        return handler_error(req, "404 Not Found", "recording not found");
+    free(files);
+    if (renamed == 0) {
+        return handler_error(req, "404 Not Found", "no such session");
+    }
+    if (failed) {
+        return handler_error(req, "500 Internal Server Error", "some files could not be renamed");
     }
     return handler_ok(req);
+}
+
+// --- Logging settings, targets, device detail, history ------------------------
+
+// POST /api/log/config {"autostart":0|1, "wifi_off":0|1, "serial":0|1} -- any subset.
+static esp_err_t handler_log_config(httpd_req_t *req) {
+    char body[96];
+    if (!read_body(req, body, sizeof(body))) {
+        return handler_error(req, "400 Bad Request", "bad body");
+    }
+    int v = 0;
+    if (json_extract_int(json_find_value(body, "autostart"), &v)) scan_log_set_autostart(v != 0);
+    if (json_extract_int(json_find_value(body, "wifi_off"), &v)) scan_log_set_wifi_off(v != 0);
+    if (json_extract_int(json_find_value(body, "serial"), &v)) scan_log_set_serial(v != 0);
+    return handler_ok(req);
+}
+
+// GET /api/targets -> the rule text as plain text.
+static esp_err_t handler_targets_get(httpd_req_t *req) {
+    char *text = malloc(SCAN_LOG_RULES_MAX + 1);
+    if (text == NULL) {
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+    size_t n = scan_log_get_rules(text, SCAN_LOG_RULES_MAX + 1);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_send(req, text, n);
+    free(text);
+    return ESP_OK;
+}
+
+// POST /api/targets with the rule text as a plain-text body.
+static esp_err_t handler_targets_set(httpd_req_t *req) {
+    if (req->content_len > SCAN_LOG_RULES_MAX) {
+        return handler_error(req, "400 Bad Request", "rules too long");
+    }
+    char *text = malloc(SCAN_LOG_RULES_MAX + 1);
+    if (text == NULL) {
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+    int got = 0;
+    while (got < (int)req->content_len) {
+        int r = httpd_req_recv(req, text + got, req->content_len - got);
+        if (r <= 0) {
+            free(text);
+            return handler_error(req, "400 Bad Request", "bad body");
+        }
+        got += r;
+    }
+    text[got] = '\0';
+    char err[120];
+    bool ok = scan_log_set_rules(text, err, sizeof(err));
+    free(text);
+    if (!ok) {
+        return handler_error(req, "400 Bad Request", err);
+    }
+    return handler_ok(req);
+}
+
+static bool parse_addr_param(const char *s, uint8_t out[BLE_ADDR_LEN]) {
+    unsigned b[6];
+    if (sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) {
+        return false;
+    }
+    for (int i = 0; i < 6; i++) out[i] = (uint8_t)b[i];
+    return true;
+}
+
+// GET /api/ble/device?a=AA:BB:CC:DD:EE:FF&t=<addr type> -- one device with its
+// last payloads and RSSI history (oldest first: r = mean RSSI per second,
+// null = not heard; c = packets in that second).
+static esp_err_t handler_ble_device(httpd_req_t *req) {
+    char query[64], a[24] = "", t[6] = "0";
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "a", a, sizeof(a));
+        httpd_query_key_value(query, "t", t, sizeof(t));
+    }
+    // %3A-encoded colons come through literally from fetch(); accept both.
+    char addr_txt[24];
+    size_t o = 0;
+    for (size_t i = 0; a[i] && o + 1 < sizeof(addr_txt); i++) {
+        if (a[i] == '%' && a[i + 1] == '3' && (a[i + 2] == 'A' || a[i + 2] == 'a')) {
+            addr_txt[o++] = ':';
+            i += 2;
+        } else {
+            addr_txt[o++] = a[i];
+        }
+    }
+    addr_txt[o] = '\0';
+    uint8_t addr[BLE_ADDR_LEN];
+    if (!parse_addr_param(addr_txt, addr)) {
+        return handler_error(req, "400 Bad Request", "bad address");
+    }
+    ble_device_t *d = heap_caps_malloc(sizeof(ble_device_t), MALLOC_CAP_SPIRAM);
+    if (d == NULL) {
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+    uint32_t sec = 0;
+    if (!ble_scanner_get_device(addr, (uint8_t)atoi(t), d, &sec)) {
+        free(d);
+        return handler_error(req, "404 Not Found", "device not known (any more)");
+    }
+    int64_t now = esp_timer_get_time();
+    char *buf = malloc(4096);
+    if (buf == NULL) {
+        free(d);
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+    const size_t cap = 4096;
+    char astr[18], name_esc[2 * BLE_NAME_MAX];
+    ble_addr_str(d->addr, astr);
+    json_escape(name_esc, sizeof(name_esc), d->name);
+    size_t off = append(buf, cap, 0,
+                        "{\"a\":\"%s\",\"t\":%u,\"k\":\"%s\",\"n\":\"%s\",\"nk\":%u,\"r\":%d,\"ra\":%.1f,"
+                        "\"rn\":%d,\"rx\":%d,\"c\":%u,\"ps\":%u,\"f\":%lld,\"l\":%lld,\"m\":%d,\"ap\":%u,"
+                        "\"u\":%u,\"tx\":%d,\"p\":%u,\"ph\":%u,\"tg\":%d,\"adv\":\"",
+                        astr, d->addr_type, ble_addr_kind(d->addr_type, d->addr), name_esc, d->name_kind,
+                        d->rssi_last, d->rssi_avg, d->rssi_min, d->rssi_max, (unsigned)d->count,
+                        (unsigned)d->rate, (long long)((now - d->first_us) / 1000),
+                        (long long)((now - d->last_us) / 1000),
+                        d->company_id == 0xFFFF ? -1 : (int)d->company_id, (unsigned)d->appearance,
+                        (unsigned)d->uuid16, d->tx_power, (unsigned)d->props_seen, (unsigned)d->phys_seen,
+                        d->target ? 1 : 0);
+    for (int i = 0; i < d->adv_len; i++) off = append(buf, cap, off, "%02X", d->adv_data[i]);
+    off = append(buf, cap, off, "\",\"rsp\":\"");
+    for (int i = 0; i < d->rsp_len; i++) off = append(buf, cap, off, "%02X", d->rsp_data[i]);
+    off = append(buf, cap, off, "\",\"hr\":[");
+    for (int i = 0; i < BLE_HIST_SECONDS; i++) {
+        int8_t v = d->hist_rssi[(sec + 1 + i) % BLE_HIST_SECONDS];
+        off = append(buf, cap, off, v == 127 ? "%snull" : "%s%d", i ? "," : "", (int)v);
+    }
+    off = append(buf, cap, off, "],\"hc\":[");
+    for (int i = 0; i < BLE_HIST_SECONDS; i++) {
+        off = append(buf, cap, off, "%s%u", i ? "," : "", d->hist_cnt[(sec + 1 + i) % BLE_HIST_SECONDS]);
+    }
+    off = append(buf, cap, off, "]}");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, off);
+    free(buf);
+    free(d);
+    return ESP_OK;
+}
+
+// GET /api/ble/history -- reports/s and devices heard per second, oldest first.
+static esp_err_t handler_ble_history(httpd_req_t *req) {
+    uint16_t *rps = malloc(sizeof(uint16_t) * BLE_GHIST_SECONDS * 2);
+    char *buf = malloc(BLE_GHIST_SECONDS * 14 + 64);
+    if (rps == NULL || buf == NULL) {
+        free(rps);
+        free(buf);
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+    uint16_t *dev = rps + BLE_GHIST_SECONDS;
+    int n = ble_scanner_get_history(rps, dev, BLE_GHIST_SECONDS);
+    const size_t cap = BLE_GHIST_SECONDS * 14 + 64;
+    size_t off = append(buf, cap, 0, "{\"rps\":[");
+    for (int i = 0; i < n; i++) off = append(buf, cap, off, "%s%u", i ? "," : "", rps[i]);
+    off = append(buf, cap, off, "],\"dev\":[");
+    for (int i = 0; i < n; i++) off = append(buf, cap, off, "%s%u", i ? "," : "", dev[i]);
+    off = append(buf, cap, off, "]}");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, off);
+    free(buf);
+    free(rps);
+    return ESP_OK;
 }
 
 // Places a marker at "now" (= the moment of this request = the user's click).
@@ -2019,7 +1883,8 @@ static esp_err_t handler_settings_button_mark(httpd_req_t *req) {
 
 // GET /api/ble/devices?age=<seconds> -- devices seen within `age` s (default
 // 60, 0 = all known). Compact keys, since a busy place can list hundreds:
-//   a addr, k address kind, n name, r/ra/rn/rx RSSI last/avg/min/max,
+//   a addr, t addr type (0 public, 1 random), k address kind, n name,
+//   r/ra/rn/rx RSSI last/avg/min/max,
 //   c reports, ps reports in the last second, f/l first/last seen (ms ago),
 //   m company id (-1 none), ap appearance, u first 16-bit service UUID,
 //   tx TX power (127 unknown), p props bits, ph PHY bits, tg target.
@@ -2049,10 +1914,10 @@ static esp_err_t handler_ble_devices(httpd_req_t *req) {
         json_escape(name_esc, sizeof(name_esc), d->name);
         char item[400];
         snprintf(item, sizeof(item),
-                 "%s{\"a\":\"%s\",\"k\":\"%s\",\"n\":\"%s\",\"r\":%d,\"ra\":%.1f,\"rn\":%d,"
+                 "%s{\"a\":\"%s\",\"t\":%u,\"k\":\"%s\",\"n\":\"%s\",\"r\":%d,\"ra\":%.1f,\"rn\":%d,"
                  "\"rx\":%d,\"c\":%u,\"ps\":%u,\"f\":%lld,\"l\":%lld,\"m\":%d,\"ap\":%u,"
                  "\"u\":%u,\"tx\":%d,\"p\":%u,\"ph\":%u,\"tg\":%d}",
-                 i == 0 ? "" : ",", addr, ble_addr_kind(d->addr_type, d->addr), name_esc,
+                 i == 0 ? "" : ",", addr, (unsigned)d->addr_type, ble_addr_kind(d->addr_type, d->addr), name_esc,
                  d->rssi_last, d->rssi_avg, d->rssi_min, d->rssi_max, (unsigned)d->count,
                  (unsigned)d->rate, (long long)((now_us - d->first_us) / 1000),
                  (long long)((now_us - d->last_us) / 1000),
@@ -2090,19 +1955,6 @@ static esp_err_t handler_ble_config(httpd_req_t *req) {
     if (json_extract_int(json_find_value(body, "coded"), &v)) {
         ble_scanner_set_coded(v != 0);
     }
-    return handler_ok(req);
-}
-
-static esp_err_t handler_settings_auto_range(httpd_req_t *req) {
-    char body[48];
-    if (!read_body(req, body, sizeof(body))) {
-        return handler_error(req, "400 Bad Request", "bad body");
-    }
-    int enabled = 0;
-    if (!json_extract_int(json_find_value(body, "enabled"), &enabled)) {
-        return handler_error(req, "400 Bad Request", "missing enabled");
-    }
-    recorder_set_auto_range(enabled != 0);
     return handler_ok(req);
 }
 
@@ -2229,6 +2081,11 @@ static void register_handlers(httpd_handle_t server) {
         {.uri = "/api/status", .method = HTTP_GET, .handler = handler_status},
         {.uri = "/api/ble/devices", .method = HTTP_GET, .handler = handler_ble_devices},
         {.uri = "/api/ble/config", .method = HTTP_POST, .handler = handler_ble_config},
+        {.uri = "/api/ble/device", .method = HTTP_GET, .handler = handler_ble_device},
+        {.uri = "/api/ble/history", .method = HTTP_GET, .handler = handler_ble_history},
+        {.uri = "/api/log/config", .method = HTTP_POST, .handler = handler_log_config},
+        {.uri = "/api/targets", .method = HTTP_GET, .handler = handler_targets_get},
+        {.uri = "/api/targets", .method = HTTP_POST, .handler = handler_targets_set},
         {.uri = "/api/accel/config", .method = HTTP_POST, .handler = handler_accel_config},
         {.uri = "/api/accel/selftest", .method = HTTP_POST, .handler = handler_accel_selftest},
         {.uri = "/api/accel/remember", .method = HTTP_POST, .handler = handler_accel_remember},
@@ -2239,7 +2096,6 @@ static void register_handlers(httpd_handle_t server) {
         {.uri = "/api/record/mark/delete", .method = HTTP_POST, .handler = handler_record_mark_delete},
         {.uri = "/api/record/markers", .method = HTTP_GET, .handler = handler_record_markers},
         {.uri = "/api/settings/button_mark", .method = HTTP_POST, .handler = handler_settings_button_mark},
-        {.uri = "/api/settings/auto_range", .method = HTTP_POST, .handler = handler_settings_auto_range},
         {.uri = "/api/settings/mdns_friendly", .method = HTTP_POST, .handler = handler_mdns_friendly},
         {.uri = "/api/settings/report_enabled", .method = HTTP_POST, .handler = handler_report_enabled},
         {.uri = "/api/sync/edges", .method = HTTP_GET, .handler = handler_sync_edges},
@@ -2267,10 +2123,6 @@ static void register_handlers(httpd_handle_t server) {
         {.uri = "/api/recordings", .method = HTTP_GET, .handler = handler_recordings_list},
         {.uri = "/api/recordings/delete", .method = HTTP_POST, .handler = handler_recordings_delete},
         {.uri = "/api/recordings/rename", .method = HTTP_POST, .handler = handler_recordings_rename},
-        {.uri = "/api/export/csv", .method = HTTP_POST, .handler = handler_export_csv},
-        {.uri = "/api/export/resume", .method = HTTP_POST, .handler = handler_export_resume},
-        {.uri = "/api/export/discard", .method = HTTP_POST, .handler = handler_export_discard},
-        {.uri = "/api/export/cancel", .method = HTTP_POST, .handler = handler_export_cancel},
         {.uri = "/api/download", .method = HTTP_GET, .handler = handler_download},
         {.uri = "/api/udp/start", .method = HTTP_POST, .handler = handler_udp_start},
         {.uri = "/api/udp/stop", .method = HTTP_POST, .handler = handler_udp_stop},

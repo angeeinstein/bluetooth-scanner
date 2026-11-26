@@ -122,6 +122,12 @@ int wifi_manager_get_saved(wifi_saved_info_t *out, int max);
 // it the active connection target. If it's already saved, this just updates
 // its password -- the way to fix a network whose password changed. Returns
 // immediately; the connection happens asynchronously in the reconnect task.
+// Turns the whole Wi-Fi radio (AP + station) off or back on, asynchronously
+// via the reconnect task. Used by BTScanner's 100 % scan mode so BLE gets the
+// shared 2.4 GHz radio to itself; saved networks and settings are untouched.
+void wifi_manager_set_radio_enabled(bool enabled);
+bool wifi_manager_get_radio_enabled(void);
+
 bool wifi_manager_connect(const char *ssid, const char *password);
 
 // Connects to an already-remembered network by SSID (a manual switch). No

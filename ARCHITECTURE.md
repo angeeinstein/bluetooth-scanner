@@ -32,6 +32,7 @@ at the level of detail needed to write about it or to onboard a new developer.
 14. [OTA firmware updates](#14-ota-firmware-updates)
 15. [Cross‑cutting design principles](#15-cross-cutting-design-principles)
 16. [BLE scanner](#16-ble-scanner)
+17. [Scan log and sessions](#17-scan-log-and-sessions)
 
 ---
 
@@ -692,6 +693,59 @@ flowchart LR
   entries the table is rebuilt keeping only the 2048 most recently seen.
 - **Settings** (`ble` NVS namespace): `active`, `coded`; changing one restarts
   discovery immediately.
+- **History.** Every device entry keeps its last 120 s (mean RSSI and packet
+  count per second, written by the 1 Hz tick) and its last advertisement and
+  scan‑response payloads (64 B each); the scanner also keeps a 600 s global
+  history (reports/s, devices heard per second). That's why the table is
+  2048 slots (~1 MB): purge at 1536, keep the newest 1024. List snapshots
+  copy only the summary fields; `/api/ble/device` returns one full entry.
+- **Targets.** `ble_scanner_set_target_fn()` is evaluated on every update;
+  the hook's device copy carries `target_event` on the first match, after a
+  30 s gap, or after `ble_scanner_rearm_targets()` (called at every session
+  start, so each log lists the targets already present).
 - **Wi‑Fi coexistence.** While Wi‑Fi is on, the arbiter gives it radio slots,
-  so BLE gets less than 100 % air time; a mode that turns Wi‑Fi off while
-  logging is planned with the scan logger.
+  so BLE gets less than 100 % air time. The 100 % scan mode (§17) stops Wi‑Fi
+  while logging.
+
+## 17. Scan log and sessions
+
+```mermaid
+flowchart LR
+  P[ble_proc<br/>report hook] -->|ADV / TARGET rows| S[scan_log.c]
+  B[POWER button / dashboard] -->|markers| R
+  T[scan_log tick 1 Hz] -->|STATUS / INFO rows| S
+  S -->|recorder_log_line| L[(PSRAM line ring<br/>1 MB)]
+  S -.->|optional BTS, prefix| U[USB serial]
+  L --> W[sd_writer<br/>core 1, prio 12] --> F[(/sdcard/ble/&lt;base&gt;.csv)]
+  R[recorder.c<br/>sessions, markers] --> W
+```
+
+- **Split of work.** `recorder.c` owns the card (mount, card‑detect, space),
+  the session lifecycle (start/stop handshake, rotation, `.log` / `.mark`
+  sidecars, fsync every 5 s) and the line buffer. It knows nothing about the
+  CSV. `scan_log.c` owns the schema (header row, every row kind, the on‑card
+  `FORMAT.md`), target rules, logging settings and a 1 Hz task. The recorder
+  API keeps VibraShock's names (`recorder_request_start`, markers, errors),
+  so the POWER button, LED and OTA guard didn't change.
+- **Line buffer.** Producers on several tasks append whole lines under a
+  recursive mutex — all or nothing, a full buffer counts a `log_drops` — and
+  the SD writer is the only consumer. `s_accept` gates it: true only while a
+  session is open. The writer opens the file, then (holding the mutex) sets
+  `s_accept` and lets `scan_log_session_begin()` queue the START row, so no
+  scan row can precede it; at the end `scan_log_session_end()` queues STOP and
+  closes the gate before the final flush.
+- **Rotation** at 1 GB happens only at a newline inside the chunk being
+  written, so no row is split; every part starts with the header row.
+- **Stack budget.** Event rows are formatted on the caller's stack (the POWER
+  poll task has 4 KB): 512 B, falling back to the heap only for long info
+  texts (START with many rules). ADV rows use a static 1.8 KB buffer on the
+  single BLE processing task.
+- **1 Hz task.** STATUS row while logging; clock watch (INFO `clock_set` on
+  the first valid wall time, `clock_adjusted` on a >2 s jump against uptime);
+  100 % scan mode: 5 s after a session starts, `wifi_manager_set_radio_enabled
+  (false)` stops AP + STA through the Wi‑Fi task (reconnect logic ignores the
+  resulting disconnects); session end turns it back on immediately.
+- **Settings** live in `bts_log` (autostart, wifi_off, serial) and rules in
+  `bts_targets` — new namespaces, so VibraShock's keys are never touched.
+- **Accelerometer.** Its recording rings shrank to 128 KB / 32 KB; the SD
+  writer just drains them until the motion pipeline replaces them.

@@ -18,6 +18,7 @@
 #include "ota.h"
 #include "power_ctrl.h"
 #include "recorder.h"
+#include "scan_log.h"
 #include "sync_trigger.h"
 #include "udp_stream.h"
 #include "version.h"
@@ -71,6 +72,7 @@ void app_main(void) {
     if (!ble_scanner_start()) {
         printf("main: BLE scanner failed to start\n");
     }
+    scan_log_init(); // CSV rows, target rules, 100 % scan mode (works without BLE/SD too)
 
     device_report_start(); // periodic local-IP reporting to the update server (best-effort)
 
@@ -86,6 +88,7 @@ void app_main(void) {
 
     dashboard_start();
     power_ctrl_signal_ready();
+    scan_log_maybe_autostart(); // optional "log from power-on" (skipped without an SD card)
 
     // Boot ran to completion -- accept this firmware image, cancelling the OTA
     // rollback that would otherwise revert on the next reboot. Reaching this

@@ -16,13 +16,13 @@ without history; no link to that repo). PlatformIO + **ESP-IDF 5.2.1**, single
 env `esp32-s3-selftest`. Windows host, PowerShell primary. C firmware in `src/`;
 the web dashboard is HTML embedded into the binary.
 
-**Rework in progress**, in this order: (1) rename/identity — done; (2) BLE
-scanner (NimBLE) + live device list; (3) SD scan log — per-device summary by
-default, switchable full capture of every advertisement; (4) accelerometer
-reduced to a ~100 Hz motion log + still/moving, steps, estimated speed;
-(5) remove vibration analysis UI. Keep `udp_stream`/`ws_stream` (detached
-from full-rate accel) for a later middle-ground stream. Code not yet reworked
-still does vibration-recorder things, and docs say so where they're inherited.
+**Rework status:** done — rename/identity, BLE scanner (NimBLE) + live device
+list, SD scan log (every report as a CSV row), target rules, 100 % scan mode,
+web UI rebuilt around BLE (vibration graphs/FFT/spectrogram/CSV conversion
+removed). **Next:** accelerometer reduced to a ~100 Hz motion log +
+still/moving, steps, estimated speed, relative direction. Keep
+`udp_stream`/`ws_stream` (still raw accel, no UI) for a later middle-ground
+stream. Docs mark what's still inherited from VibraShock.
 
 - The ESP32-S3 is **BLE only** — no Classic Bluetooth. Wi-Fi and BLE share
   one radio (coexistence), so heavy Wi-Fi traffic cuts scan time.
@@ -91,7 +91,7 @@ still does vibration-recorder things, and docs say so where they're inherited.
    allowed to hard-fail. See the comment above `ota_mark_valid()`.
 
 4. **Dashboard URI handler cap.** [src/web/dashboard.c](src/web/dashboard.c) sets
-   `config.max_uri_handlers = 60` (~51 registered). Adding endpoints past the cap
+   `config.max_uri_handlers = 60` (~54 registered). Adding endpoints past the cap
    silently fails to register (boot logs "no slots left for registering handler",
    and the endpoint 404s) — raise it in step if you add handlers.
 
@@ -116,14 +116,13 @@ still does vibration-recorder things, and docs say so where they're inherited.
    board never talks to VibraShock's server. Keep BTScanner's SD files out of
    VibraShock's `/rec` directory.
 
-8. **Changed anything a recording writes? Update the on-card format doc.** The
-   firmware writes `s_format_doc` (in [src/recorder.c](src/recorder.c)) to
-   `/rec/FORMAT.md` on every SD card, and scripts/AI agents reading a card rely on
-   it. Any change to the `.bin` header or layout ([src/recording_format.h](src/recording_format.h)),
-   the `.log` lines, the `.aux.csv` columns, the `.mark` format, the CSV export, or
-   file naming/rotation must update that text in the same change — plus the
-   README's "Recorded file format" section. Nothing checks this; a stale doc
-   silently misleads every reader of the card.
+8. **Changed anything the scan log writes? Update the on-card format doc.** The
+   firmware writes `s_format_doc` (in [src/scan_log.c](src/scan_log.c), next to
+   the CSV header and row formatting) to `/ble/FORMAT.md` on every SD card, and
+   scripts/AI agents reading a card rely on it. Any change to the CSV columns or
+   row kinds, the `.log` lines, the `.mark` format, or file naming/rotation
+   ([src/recorder.c](src/recorder.c)) must update that text in the same change —
+   plus the README's "Scan log format" section. Nothing checks this.
 
 ## Documentation discipline (do this as part of the change, not later)
 
@@ -169,9 +168,10 @@ still does vibration-recorder things, and docs say so where they're inherited.
 
 `main.c` (boot/init order + OTA validate) · `ble_scanner.*` (NimBLE continuous
 extended scan → PSRAM report queue → processing task: AD decode, per-address
-device table, report hook for the logger) · `accel_capture.*` (IIS3DWB FIFO+DMA,
-ring buffers) · `ring_buffer.*` · `recorder.*` (recording, markers, SD space) ·
-`csv_export.*` (on-device CSV) · `ota.*` + `ota_token.h` (OTA install + token
+device table with 2 min history + last payloads, report hook, targets) ·
+`scan_log.*` (CSV schema + FORMAT.md, ADV/TARGET/MARK/STATUS/INFO rows, target
+rules, logging settings, 100 % scan mode, serial mirror) · `accel_capture.*` (IIS3DWB FIFO+DMA,
+ring buffers) · `ring_buffer.*` · `recorder.*` (SD card, logging sessions, line buffer → SD writer, markers) · `ota.*` + `ota_token.h` (OTA install + token
 gate) · `ota_cloud.*` (pull-from-URL update server + authed POST helper) ·
 `device_report.*` (periodic local-IP reporting to the update server) ·
 `wifi_manager.*` · `power_ctrl.*` (charger, fuel gauge, low-battery,

@@ -1,6 +1,7 @@
 #include "ble_scanner.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
@@ -25,9 +26,10 @@
 #define SCAN_ITVL 80
 
 #define REPORT_QUEUE_LEN 512   // ~145 KB in PSRAM: absorbs bursts while the logger writes
-#define DEV_TABLE_SIZE 4096    // open-addressing hash table (power of two), in PSRAM
-#define DEV_TABLE_HIGH 3072    // purge old entries when this full (keeps probing short)
-#define DEV_KEEP_MAX 2048      // ... down to at most this many, newest first
+#define DEV_TABLE_SIZE 2048    // open-addressing hash table (power of two), in PSRAM (~1 MB)
+#define DEV_TABLE_HIGH 1536    // purge old entries when this full (keeps probing short)
+#define DEV_KEEP_MAX 1024      // ... down to at most this many, newest first
+#define TARGET_REARM_GAP_US (30LL * 1000000) // a target unseen this long emits a new TARGET event
 #define DEV_RECENT_US (60LL * 1000000) // "recent" for the status counter
 
 static QueueHandle_t s_queue = NULL;
@@ -55,6 +57,12 @@ static uint32_t s_reports_this_s = 0;
 static uint32_t s_reports_per_s = 0;
 static uint32_t s_devices_recent = 0;
 static uint32_t s_table_purges = 0;
+static volatile uint32_t s_target_events = 0;
+
+// History clock: s_sec counts finished seconds since start (the 1 Hz tick).
+static uint32_t s_sec = 0;
+static uint16_t s_g_rps[BLE_GHIST_SECONDS];
+static uint16_t s_g_dev[BLE_GHIST_SECONDS];
 
 // --- Address helpers ----------------------------------------------------
 
@@ -228,8 +236,12 @@ static void tab_update(const ble_report_t *r, const ble_adv_parsed_t *p, ble_dev
         tab_purge();
     }
     ble_device_t *d = tab_slot(s_tab, r->addr, r->addr_type);
-    if (!d->used) {
+    int64_t prev_last = 0;
+    if (d->used) {
+        prev_last = d->last_us;
+    } else {
         memset(d, 0, sizeof(*d));
+        memset(d->hist_rssi, 127, sizeof(d->hist_rssi)); // 127 = not heard
         d->used = 1;
         memcpy(d->addr, r->addr, BLE_ADDR_LEN);
         d->addr_type = r->addr_type;
@@ -244,6 +256,8 @@ static void tab_update(const ble_report_t *r, const ble_adv_parsed_t *p, ble_dev
     d->count++;
     d->count_this_s++;
     if (r->rssi != 127) {
+        d->rssi_sum_this_s += r->rssi;
+        d->rssi_n_this_s++;
         d->rssi_last = r->rssi;
         if (r->rssi < d->rssi_min) d->rssi_min = r->rssi;
         if (r->rssi > d->rssi_max) d->rssi_max = r->rssi;
@@ -271,29 +285,108 @@ static void tab_update(const ble_report_t *r, const ble_adv_parsed_t *p, ble_dev
             }
         }
     }
+    // Keep the latest payload of each kind (truncated) for the device detail view.
+    uint8_t keep = r->data_len < BLE_PAYLOAD_KEEP ? r->data_len : BLE_PAYLOAD_KEEP;
+    if (r->props & BLE_PROP_SCAN_RSP) {
+        memcpy(d->rsp_data, r->data, keep);
+        d->rsp_len = keep;
+    } else {
+        memcpy(d->adv_data, r->data, keep);
+        d->adv_len = keep;
+    }
     d->props_seen |= r->props;
     if (r->prim_phy == 1 || r->sec_phy == 1) d->phys_seen |= 1;
     if (r->sec_phy == 2) d->phys_seen |= 2;
     if (r->prim_phy == 3 || r->sec_phy == 3) d->phys_seen |= 4;
-    if (s_target_fn != NULL) {
-        d->target = s_target_fn(d);
-    }
+    bool was = d->target;
+    d->target = (s_target_fn != NULL) && s_target_fn(d);
     *copy = *d;
+    copy->target_event = d->target && (!was || (prev_last != 0 && r->t_us - prev_last > TARGET_REARM_GAP_US));
+    if (copy->target_event) {
+        s_target_events++;
+    }
     xSemaphoreGive(s_tab_mux);
 }
 
-// Once per second: per-device rates and the "recent" counter.
-static void tab_tick(int64_t now_us) {
+// Once per second: per-device rates + history slot, the "recent" counter and
+// the global history. `reports` = reports processed in the second just ended.
+static void tab_tick(int64_t now_us, uint32_t reports) {
     xSemaphoreTake(s_tab_mux, portMAX_DELAY);
-    uint32_t recent = 0;
+    uint32_t recent = 0, active = 0;
+    uint32_t slot = s_sec % BLE_HIST_SECONDS;
     for (int i = 0; i < DEV_TABLE_SIZE; i++) {
         ble_device_t *d = &s_tab[i];
         if (!d->used) continue;
         d->rate = d->count_this_s;
+        d->hist_cnt[slot] = d->count_this_s > 255 ? 255 : (uint8_t)d->count_this_s;
+        d->hist_rssi[slot] = d->rssi_n_this_s ? (int8_t)(d->rssi_sum_this_s / (int32_t)d->rssi_n_this_s) : 127;
+        active += d->count_this_s > 0;
         d->count_this_s = 0;
+        d->rssi_sum_this_s = 0;
+        d->rssi_n_this_s = 0;
         recent += (now_us - d->last_us) <= DEV_RECENT_US;
     }
     s_devices_recent = recent;
+    uint32_t g = s_sec % BLE_GHIST_SECONDS;
+    s_g_rps[g] = reports > 65535 ? 65535 : (uint16_t)reports;
+    s_g_dev[g] = active > 65535 ? 65535 : (uint16_t)active;
+    s_sec++;
+    xSemaphoreGive(s_tab_mux);
+}
+
+bool ble_scanner_get_device(const uint8_t addr[BLE_ADDR_LEN], uint8_t addr_type, ble_device_t *out,
+                            uint32_t *sec) {
+    if (s_tab == NULL) {
+        return false;
+    }
+    xSemaphoreTake(s_tab_mux, portMAX_DELAY);
+    ble_device_t *d = tab_slot(s_tab, addr, addr_type);
+    bool found = d->used;
+    if (found) {
+        *out = *d;
+        if (sec) *sec = s_sec == 0 ? 0 : s_sec - 1; // last finished second
+    }
+    xSemaphoreGive(s_tab_mux);
+    return found;
+}
+
+int ble_scanner_get_history(uint16_t *rps, uint16_t *devices, int max) {
+    if (s_tab_mux == NULL) {
+        return 0;
+    }
+    xSemaphoreTake(s_tab_mux, portMAX_DELAY);
+    int n = s_sec < BLE_GHIST_SECONDS ? (int)s_sec : BLE_GHIST_SECONDS;
+    if (n > max) n = max;
+    for (int i = 0; i < n; i++) {
+        uint32_t idx = (s_sec - (uint32_t)n + (uint32_t)i) % BLE_GHIST_SECONDS;
+        rps[i] = s_g_rps[idx];
+        devices[i] = s_g_dev[idx];
+    }
+    xSemaphoreGive(s_tab_mux);
+    return n;
+}
+
+void ble_scanner_rearm_targets(void) {
+    if (s_tab == NULL) {
+        return;
+    }
+    xSemaphoreTake(s_tab_mux, portMAX_DELAY);
+    for (int i = 0; i < DEV_TABLE_SIZE; i++) {
+        s_tab[i].target = false; // the next report of a match counts as a fresh one
+    }
+    xSemaphoreGive(s_tab_mux);
+}
+
+void ble_scanner_reeval_targets(void) {
+    if (s_tab == NULL) {
+        return;
+    }
+    xSemaphoreTake(s_tab_mux, portMAX_DELAY);
+    for (int i = 0; i < DEV_TABLE_SIZE; i++) {
+        if (s_tab[i].used) {
+            s_tab[i].target = (s_target_fn != NULL) && s_target_fn(&s_tab[i]);
+        }
+    }
     xSemaphoreGive(s_tab_mux);
 }
 
@@ -308,7 +401,9 @@ int ble_scanner_snapshot(ble_device_t *out, int max, uint32_t max_age_ms, int64_
     for (int i = 0; i < DEV_TABLE_SIZE && n < max; i++) {
         const ble_device_t *d = &s_tab[i];
         if (d->used && (max_age_ms == 0 || now - d->last_us <= (int64_t)max_age_ms * 1000)) {
-            out[n++] = *d;
+            // Summary fields only (they come first in the struct) -- payloads and
+            // history would make a list snapshot ~1 MB; see ble_scanner_get_device().
+            memcpy(&out[n++], d, offsetof(ble_device_t, adv_len));
         }
     }
     xSemaphoreGive(s_tab_mux);
@@ -443,7 +538,7 @@ static void proc_task(void *param) {
             if (now >= next_tick) next_tick = now + 1000000; // fell behind -- resync
             s_reports_per_s = s_reports_this_s;
             s_reports_this_s = 0;
-            tab_tick(now);
+            tab_tick(now, s_reports_per_s);
             // Watchdog: synced but no discovery running -> restart it. NimBLE's
             // own state is the truth; s_scanning just mirrors it for status.
             bool running = s_synced && ble_gap_disc_active();
@@ -511,6 +606,7 @@ void ble_scanner_get_status(ble_scanner_status_t *out) {
     out->devices_known = s_tab_count;
     out->devices_recent = s_devices_recent;
     out->table_purges = s_table_purges;
+    out->target_events = s_target_events;
     out->last_err = s_last_err;
 }
 
@@ -538,7 +634,7 @@ bool ble_scanner_start(void) {
 
     // Core 1, below the accelerometer drain (20) and the SD writer (12): it
     // only has to keep up on average -- the PSRAM queue absorbs bursts.
-    if (xTaskCreatePinnedToCore(proc_task, "ble_proc", 4096, NULL, 8, NULL, 1) != pdPASS) {
+    if (xTaskCreatePinnedToCore(proc_task, "ble_proc", 6144, NULL, 8, NULL, 1) != pdPASS) {
         printf("ble_scanner: could not start processing task\n");
         return false;
     }
